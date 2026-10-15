@@ -1,0 +1,192 @@
+FR3 armcode_agent 集成入口（2026-10-14）
+
+项目：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+统一配置：config/hardware/fr3.yaml
+参考图片特征库：config/perception/references.yaml；登记、离线回放与调度说明见 docs/reference_recognition.txt。
+名称解析与临时指代：docs/object_names.txt；Agent 支持 /names、/bind 简称 = 名称或编号、/bind-clear。
+启动脚本：run_fr3_agent.sh；等同于原 skill_lab.run_agent_system 入口。
+
+原 planning -> coding -> executing、GroundingDINO、SAM3、OCR、VDM/VLM、
+gate 和任务重规划接口保留。只替换 FR3 模式下的抓取后端、设备和坐标接口。
+旧 skill 名称 plan_grasp_with_anygrasp / context.anygrasp / best_grasp_xarm_mmrad
+作为兼容名称保留；FR3 默认后端为本机授权 AnyGrasp，mm/rad 字段实际表示 FR3 法兰目标。
+配置 grasp_backend: gsnet 可切回开源 GSNet；两个模型使用各自独立的推理进程。
+--legacy-xarm 仍选择旧链路。独立 xArm 调试脚本不是 FR3 入口。
+
+使用
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+
+  # 交互任务；拍摄/推理/转换，不发送机械臂或夹爪动作。
+  bash run_fr3_agent.sh --arm-speed 0.10 --visualize_selected_grasp
+
+  # 操作者运行真机任务；原有 goal / VLM / gate 等选项继续有效。
+  bash run_fr3_agent.sh --arm-speed 0.10 --visualize_selected_grasp --execute_robot
+
+需要已运行的 FR3 ROS 2 / MoveIt 2 real Docker 栈。宿主机运行相机、感知和 agent，
+每次运动通过 hardware/fr3.py 调用 Docker 中已验证的规划/执行代码。
+默认不发送运动；dry-run 仍需相机和只读真实法兰反馈，不能用假硬件 FK 配真实照片。
+LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账号或密钥。
+
+双视角相机（已替换旧 D455）
+  global：Intel RealSense D435i，序列号 346522072096，高处固定俯瞰。
+    沿用原 D455 的 global 接口，提供 RGB 场景全貌，供 VDM/VLM 和放置前后对比使用。
+  wrist：Intel RealSense D435i，序列号 349622072103，安装在机械臂末端。
+    提供对齐 RGB-D、SDK 点云和拍摄时法兰位姿，用于抓取推理和手眼坐标转换。
+  FR3 入口从 YAML 按序列号绑定，不按 USB 枚举顺序或相机型号猜测角色。
+  原 --use_vdm / VLM 设置继续有效；无需增加新相机参数，重启 agent 即可加载配置。
+  当前两台相机均为 USB 2.1，沿用已验证的 640x480、6 fps 配置。
+  俯瞰相机目前只参与图像观察；未设置它到基座的外参，不从该视角直接计算机械臂目标。
+  实际取图验证：runs/camera_roles/20261013-215121/report.json，两路相机正常。
+  此次只测试相机，未访问机械臂或夹爪；诊断用腕部图像没有绑定机器人位姿，不能直接执行抓取。
+
+速度
+  当前 YAML 默认 --arm-speed 0.20；显式传入的命令行参数优先。
+  接受范围 (0,1]；也可修改 YAML 的 arm.speed_scaling。
+  Python 设备接口：context.arm.set_speed_scaling(0.20)。只影响后续请求。
+  旧 --move_speed、--move_acc 是 xArm 单位，不用来设置 FR3 速度。
+  比例同时传入 MoveIt 速度/加速度缩放，并调节执行前轨迹检查的速度/加速度上限：
+    最大采样关节速度 0.5 * 比例 rad/s
+    最大采样关节加速度 1.0 * 比例 rad/s²
+    jerk 上限仍为 5 rad/s³；最短时长仍为 3 s。
+  0.10 保持原默认限速。0.20 不是指定 TCP 速度，也不保证每条路径恰好快两倍；
+  MoveIt、加速度、jerk 和最短时长仍可能主导执行时间。
+
+抓取和坐标
+  每次腕部拍摄前后读取法兰，等待新 RGB-D 帧；移动超过 1 mm / 0.01 rad 则丢弃。
+  图像、SDK 对齐点云、内参、序列号、标定快照和拍摄位姿存到独立 observations 目录。
+  图像缓存携带原拍摄位姿；不会用推理完成后的机械臂位置转换旧图像。
+  新任务不加载磁盘中旧的空间/图像缓存；任务记录和其他记忆逻辑保留。
+  AnyGrasp 在 /home/seur/anaconda3/envs/anygrasp/bin/python 子进程中加载，
+  Agent/SAM3/GroundingDINO 仍使用 env_armcode_agent，避免同名 gsnet 与二进制依赖冲突。
+  SDK 和权重使用 config/hardware/fr3.yaml 的 anygrasp_dir / anygrasp_ckpt / anygrasp_python。
+  保留检测 bbox/SAM mask；全场景点云做推理和碰撞筛选，再对全部幸存候选做基座系姿态筛选。
+  不先按原始分数截断候选或做 NMS。最终只返回一个选中的姿态。
+  不额外旋转 180°，不套用旧 xArm 抓取姿态修正或高度补偿。
+  使用 T_base_flange(capture) * T_flange_camera * T_camera_grasp * T_grasp_tcp，
+  再乘 inv(T_flange_tcp) 得到 MoveIt 的 fr3_link8 目标。
+  预抓取沿接近方向后退 8 cm；Robotiq 正常闭合完成后，从实际法兰反馈沿基座 Z 抬高 5 cm。
+  全部移动依旧允许 MoveIt 绕行，不保证直线路径。桌面和整套工具碰撞包络保持启用。
+  当前 TCP 沿法兰 +Z 160 mm；额外桌面余量为 0 mm，工具 padding 仍为 5 mm。
+  工具总长按用户重新测量改为 170 mm；含 padding 的碰撞包围盒为 110 × 110 × 175 mm。
+  grasp_table_clearance_check=false：不以抓取中心高度或工具包围体间隙淘汰候选。
+  工具最低高度仍写入诊断；通过候选筛选不代表通过 MoveIt 碰撞检查。
+  Agent 筛选与 MoveIt 共用 /home/seur/data/wpy/armcode_agent/config/workcell.json。
+  每次运动请求会重新安装该场景；无需重建 Docker 镜像。配置变更后重启 Agent。
+  放置释放高度由 config/hardware/fr3.yaml 的 arm.place_flange_z_m=0.30 固定：
+  指 fr3_link0 中 fr3_link8 法兰 Z=300 mm，在 TCP 转法兰后设置；X/Y 仍对准视觉容器中心。
+  接近、释放后抬升各高出 120 mm，默认法兰 Z=420 mm；目标姿态沿用原放置设置。
+  此时 place_clearance_mm 不决定释放高度。设 place_flange_z_m: null 可恢复容器相对高度。
+  与已验证的一键抓取一样，奇点指标作记录，不另加终点奇点筛选或翻转候选。
+
+夹爪与 home
+  --execute_robot 才会建立执行会话；未激活时先激活，再按任务执行开合。
+  后台保持串口轮询；通信异常会取消当前运动，运动失败不会继续闭合或自动恢复。
+  按用户要求，Agent 不再以 closing contact 决定是否抬升/搬运；闭合完成即继续。
+  gOBJ=2（闭合接触）与 gOBJ=3（到达位置）均可继续；通信、故障、动作完成检查保留。
+  执行日志保留实际 contact_detected，并标明 contact_required=false；闭合完成不代表确认抓住物体。
+  任务结束若仍夹持，进入 status/open/stop/quit 保活终端，不会自动张开。
+  YAML home_pose 为 null 时，本轮启动时的实际法兰姿态用作本轮 home；不会使用 xArm home。
+  独立 /home 命令仍需显式配置固定 home_pose。
+  放置任务保留原容器识别与高度策略，释放目标通过 TCP 转法兰；清障缓冲位等用户指定
+  mm/rad 位姿在 FR3 中表示基座系法兰位姿，需按本机工作区设置，不能照搬另一台机械臂。
+
+夹爪闭合电流反馈（2026-10-13）
+  Robotiq 返回 gCU 电机电流，驱动以 current_ma（原始值 * 10 mA）记录，同时记录
+  实际位置、目标位置、gOBJ、故障和相对时间。电流不是指尖牛顿值，也不是力传感器读数。
+  当前 YAML feedback_log_dir 已开启开合过程记录，目录为项目 runs/gripper_feedback。
+  每次动作打印 JSON 日志路径；session_info.last_motion_feedback 保存摘要。
+  close_current_limit_ma: null 表示只记录，尚未启用主机端电流阈值停止。
+  标定后填写 10..2550 的整数（10 mA 的倍数）；不提供未经测量的默认停止阈值。
+  达到阈值会发送 rGTO=0 并确认停止，抛出 GripperCurrentLimitError，中止抬升/运输。
+  不自动张开、不自动重试、不把电流上升伪装成夹持成功；停止后的 gOBJ 不用于接触判断。
+  未触发电流保护且闭合正常完成时，Agent 不再要求原生 closing contact 才抬升。该保护只作用于本驱动发出的闭合
+  动作，不是搬运中的恒力控制，也不取代夹爪内部控制。默认前台状态采样约 50 ms，
+  还受串口/调度延迟影响；不能保证检测到短暂峰值或避免软盒在检测前发生变形。
+  开合指令覆盖 speed/force 不会关闭 YAML 中已设的电流停止阈值。
+
+  操作者采集空载基线（夹爪内无物体，机械臂保持不动）：
+    /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.cli gripper console --execute --speed-raw 32 --force-raw 0
+  控制台输入 open，完成后输入 close，再输入 status 查看日志路径。使用 quit 退出。
+  若尚未激活，activate 是操作者单独输入的显式自标定动作；程序不会自动激活。
+  不要同时运行 agent 或其它串口客户端。空载曲线用于区分启动电流、运行电流和到位
+  峰值，仍需结合纸盒开始变形前的受控测量判断是否存在有效阈值，不能仅凭空载最大值
+  自动宣称能保护纸盒。若无法区分，应使用闭合量限制、柔软指垫或额外指尖力传感器。
+  CLI 还支持 --close-current-limit-ma <已确认的毫安值>，仅覆盖该次控制台/指令。
+  官方依据：
+  https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_TM_InstructionManual_HTML5_20190503.zip/2F-85_2F-140_TM_InstructionManual_HTML5/Content/4.%20Control.htm
+
+感知权重
+  GroundingDINO tiny：/home/seur/data/wpy/models/grounding-dino-tiny（已下载并用保存图像测试）。
+  官方来源：https://huggingface.co/IDEA-Research/grounding-dino-tiny
+  固定 revision：a2bb814dd30d776dcf7e30523b00659f4f141c71
+  SAM3：/home/seur/data/wpy/models/sam3/sam3.pt（已从用户下载目录复制，哈希一致，加载与分割测试通过）。
+  官方来源：https://huggingface.co/facebook/sam3 ，下载需要该账号的模型访问授权。
+  加 --use-sam-for-grasp 启用 SAM3 bbox 分割，再将 mask 传给当前抓取后端。
+  FR3 使用 predict_inst 的单目标框分割（像素 XYXY）；原 geometric 模式仍保留。
+  保存药盒图像上，原 geometric 模式只分割出边缘，instance 模式覆盖整个药盒。
+  没加此选项时沿用原简短技能的 bbox 抓取方式；SAM3 服务和独立分割技能仍保留。
+
+可视化与日志
+  FR3 主入口默认开启 --visualize_selected_grasp；AnyGrasp 使用原生 Open3D 展示点云和最终一个抓取。
+  显示的是姿态筛选/综合评分后真正选中的候选，与执行目标对应；控制台同时输出目标法兰位姿。
+  用 --no-visualize-selected-grasp 可关闭每次抓取前的预览。
+  若启用了 --execute_robot，关闭可视化窗口后继续已选任务的执行。
+  runs/agent_anygrasp/<id>/ 保存本次点云、mask、模型日志、最终选中抓取和转换后的目标。
+  离线查看：bash run_anygrasp_offline.sh view runs/agent_anygrasp/<id> --stage selected
+  --stage target --top-k 0 显示全部目标候选；--stage eligible 显示通过当前筛选规则的候选。
+  GSNet 后端仍保存到 runs/agent_gsnet/<id>/，旧查看入口保留。
+  MoveIt 日志仍在 /home/seur/data/wpy/armcode_agent/logs/agent。
+
+本次验证只使用保存图像、合成轨迹和模拟设备调用。完整 agent 的现场任务仍由操作者运行。
+
+FR3 姿态筛选（2026-10-13）
+  姿态为 fr3_link0 中标定转换后的 fr3_link8 RPY；当前 TCP 坐标轴与法兰平行。
+  默认目标 rx=pi、ry=0，rx/ry 周期角偏差各不超过 65 度，不约束 rz。
+  综合分 = 当前模型原始分 - lam_rx * rx偏差(弧度) - lam_ry * ry偏差(弧度)。
+  默认 lam_rx=lam_ry=1。先应用姿态约束，再按综合分排序；当前关闭候选桌面间隙检查。
+  默认 best_good：选择综合分最高者。随机模式也只从满足全部约束的候选中选。
+  在原启动命令后追加：
+    --grasp-selection-mode random_top_k_good --grasp-random-select-top-k 5
+  加 --grasp-random-seed 42 可对同一候选池复现随机选择。
+  可调 --grasp-target-rx / --grasp-target-ry（弧度），
+       --grasp-max-rx-tilt-deg / --grasp-max-ry-tilt-deg（度），
+       --grasp-lam-rx / --grasp-lam-ry（非负惩罚系数）。
+  不旋转或修正候选，不在没有合格候选时退化成原始最高分；MoveIt 检查仍然执行。
+  anygrasp/filtered_candidates.npy（GSNet 为 gsnet/）保存点云筛选后的完整池；pose_selection.json 保存逐候选
+  角度偏差、综合分、姿态/桌面合格状态、随机池和最终选择。grasps.npy/json 和可视化
+  始终只指向最终选中的一个抓取。此逻辑不会解决上游碰撞筛选已将候选清零的情况。
+  保存点云离线回放：runs/pose_selection_validation/20261013T150501/summary.json。
+  318 个通过点云筛选的候选中有 294 个通过姿态/工具间隙检查；默认综合评分选择
+  从原始分最高的 index 23 改为 index 97，roll 偏差由 27.74 度降为 13.41 度。
+  该回放只读取旧数据，不代表当前桌面目标；没有查询或控制设备。
+
+验证记录
+  conda pytest：194 项通过（排除缺少既有 pybullet 依赖的 test_gate_sim.py）。
+  Docker 内合成轨迹：6 项通过；没有启动运动客户端或查询真机。
+  GroundingDINO 在保存 RGB 图像中检测到盒子，GSNet 使用同帧 SDK 点云返回一姿态。
+  原 skill 接口完成坐标转换，Open3D --check-only 成功加载新输出。
+  本次修改前备份：/home/seur/data/wpy/backups/agent_integration_20261013_210600
+
+SAM3 权重接入验证（2026-10-13）
+  用户下载的原文件保留在 /home/seur/下载/sam3.pt。
+  使用已保存的 GroundingDINO 检测框，通过正式 build_segmenter/plan_grasp 接口执行：
+    SAM3 单目标分割 -> mask 筛选 GSNet -> 标定法兰位姿。
+  分割 mask 面积 19211 像素；生成一个抓取候选；15 项相关测试通过。
+  报告：runs/sam3_validation/20261013-214505/report.json
+  可视化：runs/sam3_validation/20261013-214505/box_overlay.png
+  未连接相机、机械臂或夹爪，未发送运动指令。
+
+2026-10-14 AnyGrasp + TCP 18 cm + 桌面余量 5 mm
+  保存数据经正式服务工厂 -> AnyGrasp 子进程 -> FR3 姿态筛选 -> 结果保存，通过。
+  候选 537，姿态与桌面均合格 21，选中姿态工具包围体最低点 7.342 mm。
+  仅 GPU 推理和离线几何验证，未连接设备、未做真机 MoveIt 规划或执行。
+  验证：runs/anygrasp_integration_validation/20261014_084753_678348/summary.json
+  旧图像仅在该离线试验中显式记录 TCP 修正后重算；正式流程仍拒绝旧标定缓存。
+
+  退出旧 Agent 后，由操作者运行完整药盒任务：
+    bash run_fr3_agent.sh --use_vdm --use_llm_planner --use-sam-for-grasp \
+      --grasp-selection-mode best_good --arm-speed 0.20 \
+      --no_replan --no_resume_from_failure --debug_output --execute_robot
+  在交互提示中输入：把抗病毒颗粒药盒放到粉色盘子里
+  此命令会实际移动机械臂和开合夹爪；需要已有 ROS 2/MoveIt real 栈处于可用状态。

@@ -1,0 +1,49 @@
+# Template only. Runtime uses fr3_handeye.yaml; this pending template cannot
+# be loaded as a calibrated transform. Null is not identity.
+schema_version: 1
+status: pending
+# Column vectors: p_parent = T_parent_child @ p_child.
+# Matrices are 4x4, with rotation in the upper left and translation at [:3, 3].
+matrix_convention: p_parent = T_parent_child @ p_child
+translation_unit: m
+
+cameras:
+  wrist:
+    # Provisional role; use the serial of the camera actually calibrated.
+    serial: 'SET_WRIST_CAMERA_SERIAL'
+    mounting: null  # eye_in_hand or eye_to_hand
+    extrinsic:
+      # For eye_in_hand, expected parent is the calibrated robot flange/EE frame.
+      # Do not rename a vendor EE/TCP frame to fr3_link8 without its transform.
+      parent_frame: null
+      # Exact camera frame used in calibration: color/depth optical frame, etc.
+      child_frame: null
+      matrix: null
+    # Helpful for matching the point cloud to its calibrated camera frame.
+    image_stream: null
+    depth_aligned_to: null
+    source_file: null
+  global:
+    serial: 'SET_GLOBAL_CAMERA_SERIAL'
+    mounting: null
+    extrinsic:
+      # For eye_to_hand, expected parent is the calibrated robot base frame.
+      parent_frame: null
+      child_frame: null
+      matrix: null
+    image_stream: null
+    depth_aligned_to: null
+    source_file: null
+
+tool:
+  flange_frame: fr3_link8
+  tcp_frame: robotiq_grasp_tcp
+  # p_flange = T_flange_tcp @ p_tcp. The 0.19 m collision envelope alone
+  # does not establish the grasp centre, its axes, or this transform.
+  T_flange_tcp: null
+
+grasp_model:
+  backend: null  # gsnet or anygrasp; confirm during service integration
+  # Desired TCP relative to a model grasp candidate. This depends on the
+  # model's grasp-frame axes and the chosen Robotiq grasp TCP, not just hand-eye.
+  T_grasp_tcp: null

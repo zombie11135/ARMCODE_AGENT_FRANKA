@@ -1,0 +1,11 @@
+# Optional object gallery. Copy to references.yaml and configure locally.
+enabled: false
+gallery_dir: ../../data/object_gallery
+checkpoint: /absolute/path/to/mobileclip_blt.pt
+device: cuda:0
+min_similarity: 0.86
+min_class_margin: 0.05
+top_k_refs: 3
+batch_size: 16
+cache_frames: 8
+log_path: ../../runs/reference_recognition

@@ -1,0 +1,7 @@
+# Already present in env_armcode_agent; ROS dependencies remain in Docker.
+PyYAML==6.0.2
+pyserial==3.5
+numpy>=1.23
+scipy>=1.9
+# requests-based VLM/LLM clients also support SOCKS proxies from the environment.
+PySocks==1.7.1

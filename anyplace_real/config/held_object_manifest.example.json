@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "transform_semantics": "T_A_B_maps_B_coordinates_into_A",
+  "object_frame": "box_center_x_long_y_short_z_thickness_front_sign_from_artwork",
+  "samples": [
+    {
+      "source": "replace_post_grasp_frame_01",
+      "T_base_tcp": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "T_base_object": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    },
+    {
+      "source": "replace_post_grasp_frame_02",
+      "T_base_tcp": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "T_base_object": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    },
+    {
+      "source": "replace_post_grasp_frame_03",
+      "T_base_tcp": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]],
+      "T_base_object": [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+    }
+  ],
+  "acceptance": {
+    "maximum_translation_rms_m": 0.003,
+    "maximum_rotation_rms_deg": 3.0
+  }
+}

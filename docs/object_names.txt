@@ -1,0 +1,121 @@
+物品编号、别名与场景名称解析（2026-10-14）
+
+项目：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+图库：data/object_gallery/gallery.json（schema_version: 2）
+
+本次接入
+  每个登记身份增加稳定 object_id（ref_ 开头）。名称、别名可修改，编号不变。
+  图库按物品身份保存图片；一个身份的多个叫法共用参考特征。
+  Agent 的 observe/grasp、任务观测记忆、gate、holding 状态统一使用已解析编号。
+  OCR 回退收到标准名称及明确别名；VLM 遮挡/放置验证收到可读名称，不收到无意义编号。
+  容器 place 的现有名称和识别链路保留。AnyGrasp、SAM3、坐标与运动配置不变。
+  旧 schema 1 可只读兼容；本机原 4 种、42 张参考图已迁移到 schema 2。
+  只加了编号与空属性字段，没有猜测品牌、补写全称或新增物品图片。
+
+名称分三类
+  name / aliases：同一物品的明确名称，跨物品不能重复。
+  attributes.brand / descriptors：品牌或共享描述，允许多个物品使用，需要图像消歧。
+  task binding：用户给下一次任务的临时指代，不写入永久图库。
+  名称先做 Unicode NFKC、大小写及连续空白归一化；不自动丢弃剂型、规格或数字。
+  未登记名称继续走原流程。不同产品/剂型/规格应使用不同身份，不能仅因包装像就合并。
+
+场景消歧
+  用户只说品牌（例如 999）时，名称解析先返回相关身份集合。
+  Planner 目录包含编号、别名、品牌等，现有 LLM 调用可使用这些信息解释叫法；
+  不增加一个逐物品 LLM 循环，不自动把模型猜测写成永久别名。
+  规划之后还会做确定性检查，已知共享名称不能仅由 LLM 猜成某一个候选。
+  执行器在建立运动/夹爪会话和回 home 之前，读取一张新的腕部图像进行身份匹配。
+  此分支只做检测和图片匹配，不做 SAM、抓取规划或运动；相同检测提示词共用检测缓存。
+  一个身份达到图片匹配阈值：绑定该编号；多个或零个确认身份：返回需要澄清的失败报告。
+  名称歧义不自动重规划重试；交互循环保留，可以换完整名称重新输入任务。
+  视觉唯一性是“当前腕部视角中被可靠匹配的唯一登记身份”，不保证视野外没有同品牌物品。
+  视野不完整或物品外观相似时，可直接用完整名称/编号，或明确做临时绑定。
+  一般未登记的自由语言理解仍由原规划与 OCR 流程承担，不是任意称呼都能被自动理解。
+
+登记图片
+  新增图形录入工具：bash register_object_photos.sh（先进入下面的项目目录）。
+  支持腕部实时预览、拍摄、框选、物品名称与正面/侧面等标签；见 docs/reference_capture.txt。
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+  ARM_AGENT_PY=/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+
+  # 查看现有身份编号、名称、别名、品牌和参考图数量；不连接硬件
+  "$ARM_AGENT_PY" -m hardware.reference_cli list
+
+  # 示例：仅当实物确为此品牌/产品时填写以下名称属性；替换 --images 的路径
+  "$ARM_AGENT_PY" -m hardware.reference_cli register '抗病毒口服液' \
+    --category medicine_box --prompt 'medicine package' \
+    --alias '999抗病毒口服液' --brand '999' --descriptor '三九' \
+    --images /实际图片目录/正面.png /实际图片目录/侧面.png /实际图片目录/斜视.png
+
+  同名且 category/prompt 一致会追加图片，不重新建立身份。重复图片不会重复计数。
+  建议每个演示物品先有 5-10 张当前腕部相机、不同方向和距离的清晰目标裁图。
+  整张场景图也可用，但每次传一张并指定 --bbox x1 y1 x2 y2，单位像素。
+  有多个物品时不要直接把全景图登记为某个单独物品。
+  --specification 可保存规格。已登记的非空品牌/规格不同会报错，避免把不同产品意外合并。
+  如果是在纠正已有记录，使用下面的显式 update 命令。
+
+只改名称资料，不重新上传图片
+  # 示例：为已经登记的实物追加核对过的完整名称及品牌
+  "$ARM_AGENT_PY" -m hardware.reference_cli update '抗病毒口服液' \
+    --alias '999抗病毒口服液' --brand '999' --descriptor '三九'
+
+  # 实际使用时用包装上的完整名称替换占位文字
+  "$ARM_AGENT_PY" -m hardware.reference_cli update '西瓜霜' --alias '包装上的实际完整名称'
+
+  # 把某个全称设为标准显示名；旧名会自动保留为别名，object_id 不变
+  "$ARM_AGENT_PY" -m hardware.reference_cli update '西瓜霜' --name '包装上的实际完整名称'
+
+  # 删除误登记的唯一别名（例如误把整个品牌当成一个产品的唯一称呼）
+  "$ARM_AGENT_PY" -m hardware.reference_cli update '抗病毒口服液' --remove-alias '999' --brand '999'
+
+  update 也接受 ref_ 编号。追加/删除别名、改品牌、改显示名不重新提取图片特征。
+  更新照片、模型或编码预处理仍会重建特征缓存。
+
+只测试名称解析
+  "$ARM_AGENT_PY" -m hardware.reference_cli resolve '抗病毒口服液'
+  "$ARM_AGENT_PY" -m hardware.reference_cli resolve '999'
+
+  resolved：明确名称/别名/编号已唯一绑定。
+  needs_scene：品牌/共享描述需要当前图像。
+  unknown：没有登记该叫法，不能仅靠名称表确定。
+  以上命令不会加载视觉模型，也不连接硬件。
+  名称表不自动猜测“999”属于哪个产品；填写品牌后 resolve 才会返回相应候选。
+
+保存图片上的完整消歧（仍不连接硬件）
+  "$ARM_AGENT_PY" -m hardware.reference_cli resolve '999' \
+    --image /实际图片目录/独立测试场景.png \
+    --output runs/name_resolution_validation/my_scene.json
+
+  图片中多个登记身份通过匹配时返回 clarification_required，并保留每个候选的证据。
+  原 recognize 命令支持名称、别名和编号；--segment 生成最终目标 mask。
+  --legacy-only 仅跳过参考图身份快速分支，明确名称仍先解析为标准名再传给旧 OCR。
+
+Agent 中的临时指代
+  原启动命令继续使用，先退出并重启 Agent 加载本次代码。
+  在 armcode> 提示符中输入：
+    /names
+    /bind 999 = 抗病毒口服液
+    把999放到粉色盘子里
+
+  /bind 的右侧也可以写 /names 列出的 ref_ 编号。
+  绑定仅给紧接着的下一次任务；开始任务时消费，即使任务失败，也不会沿用到下一次任务。
+  同一次任务内的重规划仍使用该绑定；新任务需要重新绑定或使用明确名称。
+  /bind-clear 可在开始任务前取消所有临时绑定。
+  /names 会显示下一次任务的绑定。不能用临时别名覆盖另一物品已有的正式名称/编号。
+  这些三个名称命令本身不拍摄、不控制硬件；普通任务仍按原启动模式执行。
+
+日志和后续测试
+  plan_graph.json 的 metadata.name_resolution 保存规划后的名称绑定过程。
+  runs/current_plan/name_resolution.json 保存执行前最终的名称/图像解析依据。
+  名称不明确的 failure_report.json 标记 target_name_ambiguous，automatic_replan=false。
+  图像匹配的分数、缓存与耗时仍在 runs/reference_recognition/<id>/recognition.json。
+  当前登记照片完成后再做新场景测试，测试图片与参考图片分开保存，不反复用登记图自测。
+  统计时分别记录：名称解析是否正确、是否选对物品、拒绝/澄清比例、误选率、各阶段耗时。
+  冷启动、热模型新图片、同帧缓存命中要分开；登记图片和测试图不能混为准确率真值。
+  本轮只做保存图片/模拟设备的测试，没有访问或控制任何硬件。
+  142 项相关测试通过，包含正式登记 CLI、临时绑定消费、OCR 名称回退、歧义阻止建立运动会话。
+  保存 FR3 图片以编号检索“抗病毒口服液”两次成功，图片相似度约 0.931。
+  现有 4 身份/42 参考图的名称表查询中位数约 2.46 ms（100 次）；这不是完整视觉识别时延。
+  汇总：runs/name_resolution_validation/summary.json；新数据准确率与时延留待用户登记后测试。
+  修改前备份：/home/seur/data/wpy/backups/object_names_20261014_165804。

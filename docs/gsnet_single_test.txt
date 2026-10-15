@@ -1,0 +1,83 @@
+FR3 + GSNet 单盒子、单个位姿测试
+2026-10-13
+
+更新：终点奇异筛选与固定关节解的执行入口见 gsnet_ranked_test.txt。
+以下保留首次单抓取验证记录；当前真实验证优先使用 ranked 入口，
+以便执行时保留已筛选的关节构型，而不是仅传六维位姿重新选择 IK。
+
+入口（从项目根目录运行，使用 env_armcode_agent）：
+  python -m hardware.gsnet_single --help
+
+1. 保持机器人静止、桌面盒子位置不变，拍摄腕部 D435i 并检测。
+   当前盒子的图像区域为 x=[270,445), y=[80,345)，图像 640x480。
+   盒子或相机移动后需要根据新画面调整 ROI，不能沿用历史目标。
+
+  python -m hardware.gsnet_single capture --roi 270 80 445 345
+
+   命令读取现有 real ROS 栈的法兰位姿，不会启动 Docker 或运动控制器。
+   相机取图前后位姿差应 <=1 mm / 0.01 rad；这是静止采集约束，
+   不是硬件时间同步。采集期间不要移动机器人或盒子。
+   实际相机序列号、彩色光学坐标系与标定配置必须一致。
+   全场景点云保留桌面；ROI 只限定候选抓取的参考点。
+
+2. 筛选与输出：
+   GSNet -> 有限值/正分数/开口 <=85 mm -> 盒子 ROI -> 高于桌面8 mm
+   -> 全场景近似指爪碰撞/空抓筛选 -> 取最高分的一条。
+   模型得分不是成功概率。没有合法候选就失败，不生成兜底姿态。
+   不保存其它候选，也不会在规划失败后自动换用第二名。
+   gsnet/grasps.npy 形状为 (1,17)，grasps.json 的 grasps 只有一项。
+   gsnet/grasps_on_rgb.png 为二维叠加，preview.html 为离线交互三维图。
+   targets.json 包含同一个抓取的目标和沿接近方向后退8 cm的预抓取点。
+   预抓取点不是第二个抓取候选，也不一定在目标正上方。
+
+3. 规划（将 RUN_DIR 换为 capture 输出的目录）：
+
+  python -m hardware.gsnet_single plan RUN_DIR --stage pregrasp
+  python -m hardware.gsnet_single plan RUN_DIR --stage grasp
+
+   每次从当前真实关节状态独立规划，不能把两次报告看作连续轨迹。
+   沿用已有 OMPL RRTConnect、桌面和19 cm整套工具包络、自碰撞检查。
+   MoveIt 中尚未加入相机盒子的物体几何；GSNet 指爪点云筛选也不等于
+   整条机器人路径对盒子的碰撞验证，以上报告不证明实际夹持成功。
+   规划命令不发送运动、激活控制器、打开或关闭夹爪。
+
+4. 坐标与首次实机核对：
+   手眼：采集时 T_base_flange @ T_flange_color_camera。
+   GSNet：X 为接近方向，Y 为两手指之间的连线。
+   当前夹爪连线采用法兰 X 轴的初始配置，没有加入12.34度目测修正。
+   TCP 距离法兰沿 +Z 约18 cm；TCP 坐标轴与法兰平行。
+   此次将 GSNet reference point 对应这个名义抓取 TCP，减去一次
+   18 cm TCP 偏移得到法兰目标。模型 depth 保留在报告中，不再叠加。
+   模型 reference point / depth 与 Robotiq 实际指尖、接触中心的对应
+   目前是首次试验假设，未宣称精确夹持标定或接触规划已完成。
+   因此先由操作者执行预抓取动作，观察开合方向是否跨过盒子短边，
+   以及接近方向是否指向图中绿点，再进行最后接近和夹持调试。
+   原整套 agent 的旧技能几何仍未解除迁移检查。
+
+5. 本次实测结果（机器人和夹爪没有运动）：
+   RUN_DIR = runs/gsnet_single/20261013-193640
+   相机序列号 349622072103，有效深度97.52%，点云299579点。
+   原始候选1024，宽度/分数过滤后334，桌面过滤后329，碰撞筛选后329。
+   最终保存1条，score=0.59837222，width=77.33195 mm，depth=30 mm。
+   参考点在 fr3_link0 中约 [0.418378,0.026012,0.092965] m。
+   预抓取法兰位姿（m / XYZ RPY rad）：
+     [0.31115612,0.02504983,0.29644111,-2.65745783,0.03004129,-1.61887477]
+   抓取法兰目标保存在 targets.json，不把它误作上述参考点坐标。
+   两个目标均规划成功；预抓取计划23.49秒，抓取目标计划32.41秒。
+   二者都从原始静止状态规划，均不是执行记录。
+
+   预抓取 RViz 回放（在 Ubuntu 图形桌面终端）：
+     cd /home/seur/data/wpy/armcode_agent
+     bash scripts/preview.sh logs/agent/341d17f174a04f53aaa32d83a84e9d67.jsonl
+
+   由操作者运行的预抓取移动（会重新规划并执行，不是回放旧轨迹）：
+     cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+     /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.cli arm move \
+       0.31115612 0.02504983 0.29644111 -2.65745783 0.03004129 -1.61887477 --execute
+
+   上述位置只适用于本次未移动的盒子、未改变的相机安装和工具配置。
+   实际重规划轨迹可能与预览不同；原有端点与碰撞检查仍生效。
+   后续开合调试使用已测试的 gripper console；保持会话以维持10 Hz读取，
+   避免长期无通信产生0x09。请勿同时运行多个夹爪串口客户端。
+
+测试：tests/test_gsnet_single.py，11项离线测试全部通过。

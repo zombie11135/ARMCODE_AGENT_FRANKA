@@ -1,0 +1,33 @@
+# Copy to fr3.yaml and configure locally. This example cannot run a robot.
+schema_version: 1
+arm:
+  # Separate deployed ROS 2 / MoveIt 2 workspace, not this Python source tree.
+  workspace: /absolute/path/to/fr3_ros_workspace
+  stack: fake
+  speed_scaling: 0.10
+  home_pose: null
+  place_flange_z_m: null
+gripper:
+  port: null
+  baudrate: 115200
+  slave_id: 9
+  speed_raw: 32
+  force_raw: 0
+  feedback_log_dir: null
+cameras:
+  global_serial: SET_GLOBAL_CAMERA_SERIAL
+  wrist_serial: SET_WRIST_CAMERA_SERIAL
+  width: 640
+  height: 480
+  fps: 6
+  show_window: false
+perception:
+  grasp_backend: anygrasp
+  gsnet_root: /absolute/path/to/gsnet
+  sam3_model_dir: /absolute/path/to/models/sam3
+  grounding_dino_model: /absolute/path/to/models/grounding-dino-tiny
+  anygrasp_dir: /absolute/path/to/anygrasp_sdk/grasp_detection
+  anygrasp_ckpt: /absolute/path/to/anygrasp_sdk/grasp_detection/log/checkpoint_detection.tar
+  anygrasp_python: /absolute/path/to/anygrasp_env/bin/python
+  reference_config: ../perception/references.yaml
+calibration_file: ../calibration/fr3_handeye.yaml

@@ -1,0 +1,70 @@
+AnyGrasp 保存数据对比（不连接相机、机械臂、夹爪）
+
+项目目录：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+推理环境：/home/seur/anaconda3/envs/anygrasp/bin/python
+SDK：/home/seur/franka_teleop/graspNet/anygrasp_sdk/grasp_detection
+权重：SDK 下 log/checkpoint_detection.tar；使用本机已有有效 license。
+run_anygrasp_offline.sh 只提供 infer/view，不提供任何硬件操作。
+首次离线对比未切换后端；2026-10-14 后续已将正式 Agent 改为 AnyGrasp，见 docs/fr3_agent.txt。
+
+2026-10-14 对比输入
+  GSNet run: runs/agent_gsnet/74c92cbbbdb64ec2a43f58a0f123f722
+  原始 RGB-D: runs/current_capture/observations/c738dffe75824a1e9fcd2f7729d398d9
+  掩码：上述 GSNet run 的 target_mask.npy（不使用可能被覆盖的 current_capture 掩码）。
+  已逐元素核对原始 RGB/有效点云与 GSNet scene.ply 完全一致。
+  输出：runs/anygrasp_offline/latest_mask_comparison_20261014
+
+重新推理（自动生成新目录；不重新拍摄）
+  bash run_anygrasp_offline.sh infer \
+    --gsnet-run runs/agent_gsnet/74c92cbbbdb64ec2a43f58a0f123f722 \
+    --observation runs/current_capture/observations/c738dffe75824a1e9fcd2f7729d398d9
+
+原生 Open3D 查看已有目标候选（全部 537 个，无额外姿态筛选、无 NMS）
+  bash run_anygrasp_offline.sh view \
+    runs/anygrasp_offline/latest_mask_comparison_20261014 --stage target --top-k 0
+  --top-k 20 可只显示原始分数前 20 个，--top-k 1 显示最高分。
+  --stage sdk 查看 SDK 全场景返回的 1941 个候选（已经过 SDK 内部筛选）。
+  --stage eligible 查看通过现有 FR3 姿态和工具桌面间隙检查的候选；本次为 0。
+  --stage selected 仅当有合格候选且生成 selected.npy 时使用。
+  查看 target/sdk 不代表这些候选可以直接执行。
+
+推理方式
+  输入全场景 SDK 点云和 RGB，保留桌面及周边点用于 SDK 内部碰撞检查。
+  SDK apply_object_mask=True / collision_detection=True / dense_grasp=False。
+  max_gripper_width=0.085 m，gripper_height=0.03 m，top_down_grasp=False。
+  SDK 返回后按同一目标框、保存的 SAM 掩码、基座高度过滤；不做 NMS 或 top-K 截断。
+  复用保存的 rx/ry 选择参数和 FR3 坐标变换、工具桌面间隙检查。
+  未调用 MoveIt、IK、路径规划，未连接硬件。
+  两种后端内部碰撞/物体过滤方法不同，候选数和分数不能直接代表抓取成功率。
+
+本次结果
+  AnyGrasp SDK 内部过滤后：1941；目标框后：542；SAM 后：537；高度后：537。
+  其中 527 满足 rx/ry，0 满足完整工具桌面间隙，最终 0。
+  GSNet 相同保存场景：1024 原始候选，碰撞/空抓过滤后 37，最终 0。
+  AnyGrasp 本次模型加载约 0.65 s，推理约 0.91 s；不含进程启动/模块导入。
+  target_candidates.npy 保存掩码内全部候选，eligible_candidates.npy 保存可用候选。
+  report.json / pose_selection.json / input.json 保存计数、逐候选检查及输入来源。
+
+桌面间隙诊断（table_diagnostics.json）
+  掩码内点的基座 z 高度 p5/p50/p95：12.9/25.2/29.7 mm。
+  首次对比时 T_flange_tcp 为 +Z 150 mm；工具长度 190 mm、padding 5 mm。
+  工具采用宽度 100 mm + padding 的保守长方体，要求离桌面至少 10 mm。
+  本次所有候选的抓取终点工具最低 z 为 -54.2 至 -21.7 mm。
+  这是按近似 TCP 和保守包围体计算的结果，并非实测物理穿透。
+  不应仅为了让候选通过而关闭桌面检查；需核实实际抓取中心和指尖几何。
+
+2026-10-14 TCP 修正复算
+  用户将法兰到抓取中心距离修正为 180 mm，已更新正式标定 YAML。
+  保存的 537 个 AnyGrasp 候选仅重新做坐标变换/姿态/桌面检查，未重跑推理。
+  输出：runs/anygrasp_offline/tcp18_recheck_20261014_084224_375777
+  527 个满足姿态，0 个通过完整工具桌面检查。
+  终点工具最低 z 最大为 8.210 mm，要求至少 10 mm；未改变桌面间隙。
+  原始 150 mm 捕获标定与结果保留，新结果显式记录 evaluation_calibration。
+  正式流程仍拒绝旧标定缓存；重启 Agent 后重新观察并规划。
+  上面的旧数据 infer 命令要求标定匹配，修改 TCP 后直接运行会拒绝旧记录；view 不受影响。
+
+2026-10-14 当前设置更新
+  TCP 改为法兰 +Z 160 mm。workcell.grasp_table_clearance_check=false：
+  取消抓取中心高度和工具包围体桌面间隙的候选淘汰，保留 rx/ry 筛选和综合评分。
+  table_clearance_m=0：MoveIt 桌面回到实际 z=0，桌面/工具/机械臂碰撞检查保留。
+  上述历史输出不重写；旧数据 view 可用，实时测试须重启 Agent 后重新拍摄。

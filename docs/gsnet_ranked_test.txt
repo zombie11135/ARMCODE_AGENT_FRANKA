@@ -1,0 +1,75 @@
+GSNet + FR3 终点奇异筛选（2026-10-13）
+
+本轮要求：保留 GSNet 原始抓取朝向，不生成绕接近轴翻转 180° 的候选。
+奇异性门限只约束终点。允许绕行，沿途奇异指标只记录；桌面、19 cm
+工具包络、自碰撞、关节限位、速度/加速度/加加速度检查仍约束整条轨迹。
+这些是工程筛选门限，并非 Franka Desk 内部警告阈值，不能保证无黄灯。
+
+部署改动：
+  宿主机 hardware/gsnet_ranked.py：复用静止拍摄记录，GPU 推理候选池，
+    坐标转换，调用机器人筛选，最终对外保存一个抓取和对应的关节目标。
+  宿主机 hardware/gsnet_worker.py：可保留经 NMS 的内部候选池。
+  ROS 工作区 scripts/singularity.py / fast_ik.py：按实际 URDF 计算
+    Jacobian 指标并并行求解 IK；工作进程不连接机器人或 ROS。
+  ROS 工作区 scripts/grasp_screen.py：按抓取得分优先、关节距离其次
+    筛选；通过 FK、终点裕量及碰撞后调用已有 MoveIt OMPL RRTConnect。
+  ROS 工作区 config/singularity.json：12 个 CPU 进程，每姿态 32 个种子，
+    最多 32 个抓取候选、5 次路径规划。MoveIt 规划请求按序执行，
+    并非同时调用同一个规划器。实际轨迹末点也重新检查终点门限。
+  执行入口固定已选关节目标，从当前状态重新规划；完成后再次检查实际
+    末端位姿、静止状态和终点奇异裕量。失败不自动恢复或重试。
+
+复用原始点云（盒子保持原位；手眼使用拍摄时法兰位姿，不是当前位姿）：
+
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python \
+    -m hardware.gsnet_ranked plan runs/gsnet_single/20261013-193640
+
+plan 不激活运动控制器，不开合夹爪。结果在 runs/gsnet_ranked/新时间目录。
+selection.json 保存目标关节、标定/策略快照及机器人规划报告；
+gsnet/grasps.npy 和 grasps.json 只保存一条最终结果，candidates.npy 是
+内部筛选池；grasps_on_rgb.png、preview.html 显示同一个最终抓取。
+如果场景变化，先用 gsnet_single capture 重新取图并确认新 ROI。
+
+本轮已完成规划：
+  RUN = runs/gsnet_ranked/20261013-201205-170165
+  ROS 日志 = logs/agent/a7abe51fc68c4d098e9ff3c5a3754bf7.jsonl
+  原始最高得分 0.59837222，开口 77.33195 mm，仍保留原始朝向。
+  法兰目标 fr3_link8，相对 fr3_link0，单位 m / XYZ RPY rad：
+    [0.3484507286, 0.0253846280, 0.2256668183,
+     -2.6574578344, 0.0300412911, -1.6188747651]
+  已选关节目标 rad：
+    [-1.0745749506, -1.6977362115, 1.7388724939, -2.8736139254,
+      2.1252189800, 1.8218918822, 0.7848704843]
+  末端目标不变，通过 FR3 的冗余自由度选择不同的关节姿态。
+  10 个几何合格候选、320 个 IK 种子、49 个合格关节解，首次规划通过。
+  GPU forward 0.53 s，IK 0.50 s；从推理启动到完整路径校验约 18.01 s，
+  包含可视化共 20.87 s。这些是计算用时，不是机器人运动用时。
+  当前速度/动态限制下，机器人运动预计 78.23 s，尚未执行。
+  3941 个路径采样通过碰撞检查，工具最低点 z=0.025985 m，
+  要求 z>=0.01 m。路径有 1616 个点低于终点采用的部分奇异门限，
+  按 endpoint 策略作为记录，不宣称全程远离奇点。
+  保存轨迹的实际末点已离线复查：位置误差 0.0746 mm、角度误差
+  0.000107 rad，终点门限通过。此误差是计划值，不是实机执行误差。
+
+Ubuntu 图形桌面中预览机器人轨迹：
+
+  cd /home/seur/data/wpy/armcode_agent
+  bash scripts/preview.sh logs/agent/a7abe51fc68c4d098e9ff3c5a3754bf7.jsonl
+
+以下是由操作者执行的移动命令（助手未执行）：
+
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python \
+    -m hardware.gsnet_ranked move runs/gsnet_ranked/20261013-201205-170165 --execute
+
+这条命令固定筛选出的关节目标并重新规划、检查、执行；新路径可能与
+预览不同。只运行普通的六维 move-pose 会重新选择 IK，不能用于验证
+这次特定关节构型。该命令只移动机械臂，不执行夹持或提起盒子。
+TCP 18 cm 与开合方向沿法兰 X 的既有名义配置保持不变。
+桌上盒子的点云用于 GSNet 近似指爪筛选，尚未作为物体碰撞几何加入
+MoveIt；当前轨迹检查不等同于沿途机器人各部位对盒子的碰撞验证。
+
+验证：ROS 离线测试 30 项、宿主 FR3 测试 45 项、GSNet 测试 14 项通过。
+ROS logs/diagnostics/singularity/final_validation.json 保存旧计划实际末点
+按最终策略复核的结果。规划日志没有控制器激活或轨迹执行事件。

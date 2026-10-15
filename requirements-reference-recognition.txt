@@ -1,0 +1,6 @@
+# Run from the project root with env_armcode_agent. Preserve the installed
+# Torch/CUDA/NumPy stack: python -m pip install --no-deps -r this-file
+# Prepare the MobileCLIP checkout and checkpoint first; see THIRD_PARTY.md.
+-e ./dependencies/yoloe/third_party/ml-mobileclip
+open_clip_torch==2.32.0
+ftfy==6.1.1

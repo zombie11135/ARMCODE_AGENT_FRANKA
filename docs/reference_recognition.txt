@@ -1,0 +1,103 @@
+参考图片特征库与识别调度（2026-10-14）
+
+项目：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+配置：config/perception/references.yaml
+图库：data/object_gallery/gallery.json；图片复制至同目录 images，不依赖会被覆盖的 current_capture。
+调用记录：runs/reference_recognition/<id>/recognition.json
+名称、品牌、别名和临时指代：见 docs/object_names.txt；当前图库已升级为带稳定编号的 schema 2。
+腕部预览、拍摄与正面/侧面图片录入：bash register_object_photos.sh，详见 docs/reference_capture.txt。
+
+接入范围
+  FR3 配置 perception.reference_config 已指向参考图库配置，enabled: true。
+  重启 Agent 后生效，原启动参数可以继续使用。AnyGrasp 后端保持不变。
+  原 InstructFlow 的 planning -> coding -> executing、VDM/VLM、GroundingDINO、SAM3、
+  OCR、目标观察、AnyGrasp/GSNet、gate、机械臂和夹爪技能仍保留。
+  当前测试只使用保存数据与模拟接口，没有连接相机、机械臂或夹爪。
+
+调度方式
+  大模型仍负责上层任务步骤，如 observe/grasp/place；图片匹配等基础操作由技能内部程序调度。
+  登记物体：一次 GroundingDINO 类别检测 -> MobileCLIP 批量编码候选 -> 与图库匹配。
+  请求身份排名第一、余弦相似度 >= 0.86、超过其他登记身份 >= 0.05，才接受图片证据。
+  匹配明确：若需要 mask，仅给选中的一个目标做 SAM3，随后沿原接口调用 AnyGrasp。
+  匹配不明确、未登记或模型出错：回退原多提示词检测/SAM/OCR/验证流程。
+  显式 strict OCR 模式保持原语义，直接走原流程。
+  原有 VLM 仍可用于任务描述/验证；本次没有新增逐候选大模型调用。
+  新增独立技能 register_object_reference / match_object_reference / recognize_object，旧技能未删除。
+  图片身份是独立 evidence，未伪装成 OCR 文本、OCR 分数或 VLM 置信度。
+  gate 仍检查可见性、深度和遮挡；匹配通过不代表已确认可抓或已完成轨迹规划。
+
+节省时间的具体措施
+  图库特征持久化缓存；图片、模型或编码配置变化时重建，修改名称/别名/品牌不重算向量。
+  候选区域批量编码；同一 Agent 进程复用模型。OCR 到需要时才加载。
+  检测和候选特征按图片内容 SHA256、参数缓存；即使文件名相同，内容变化也重新计算。
+  同一张图可为多个登记名称复用检测和特征；不缓存并复用机器人运动轨迹。
+  分割只针对选中的实例；不对所有可用技能逐个调用，也不新增多轮 LLM 调度。
+  首次模型加载、原 OCR 回退、任务 VLM、AnyGrasp 和 MoveIt 仍有各自延迟。
+  Open3D 预览等待人工关闭的时间也不属于视觉推理速度；此次没有改变预览设置。
+
+初始图库
+  从旧 runs/grasp_snapshots 中复制了 42 张历史参考图：
+    布洛芬 20、蒙脱石散 7、西瓜霜 9、抗病毒口服液 6。
+  名称来自原保存记录，尚未重新人工核验；provenance 已明确记录来源。
+  抗病毒颗粒不是抗病毒口服液，不自动合并；未登记名称仍使用旧识别流程。
+  当前特征编码器使用已有 MobileCLIP-B 权重 dependencies/yoloe/mobileclip_blt.pt。
+  没有替换检测器为 YOLOE，没有训练新模型，也没有替换抓取网络。
+  类别通用：药盒、方块、瓶子等可登记；需要相应英文 detector_prompt 来产生候选区域。
+
+登记新物体（以下命令只读取图片、写图库，不连接硬件）
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+
+  # 查看现有名称和数量
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.reference_cli list
+
+  # 把实际图片路径填在 --images 后；推荐先准备 5-10 张不同角度、距离的独立目标裁图。
+  # 以下路径仅为示例。不要把整张杂乱桌面直接作为目标参考图。
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.reference_cli register \
+    '抗病毒颗粒' --category medicine_box --prompt 'medicine package' \
+    --images /path/to/front.png /path/to/side.png /path/to/oblique.png
+
+  # 方块示例（可指定别名；别名要指同一个身份，不要合并不同药品/规格）
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.reference_cli register \
+    '红色方块' --category cube --prompt 'cube' --alias 'red cube' \
+    --images /path/to/red_cube_front.png /path/to/red_cube_side.png
+
+  整张场景图也可登记：每次传一张图并追加 --bbox x1 y1 x2 y2，单位像素，裁框后入库。
+  同名追加时 category/prompt 必须与该物体已登记设置一致；重复图片不重复计数。
+  图库不自动吸收模型预测，避免一次误认污染后续识别。
+  正反面、包装相似的不同药品应分别登记；补充本机腕部 D435i 的当前光照与视角。
+  模型分数不是校准概率；不要仅为了提高命中数直接调低阈值。
+
+离线回放（只运行图片识别，不启动相机、抓取推理、机械臂或夹爪）
+  /home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python -m hardware.reference_cli recognize \
+    --image runs/current_capture/observations/f19e3df7029946cd908715d78771e24c/color.png \
+    --query '抗病毒口服液' --segment --repeat 2 \
+    --output runs/reference_validation/manual_replay.json
+
+  追加 --legacy-only 可以对照原识别流程。--repeat 是同帧复用，不代表连续新画面速度。
+  回退原流程时仍会更新原 current_capture/advanced_* 调试输出；输入 observations 图片不改动。
+  当前输入图的原始 SHA 和显式排除的采集组不参与匹配，避免用同一张参考图自证识别正确。
+  warmup 命令只预计算磁盘图库特征；命令退出后不保留 GPU 模型，不能代替 Agent 进程内预热。
+
+验证与局限
+  历史已知目标框的跨采集匹配：42 个案例，39 个达到阈值，3 个因类别分差不足而拒绝。
+  报告：runs/reference_validation/identity_leave_capture_out.json。
+  这些案例来自同批物体和历史标签，不是独立人工真值，也不是 FR3 端到端抓取成功率。
+  当前 FR3 保存图上的“西瓜霜”仅 0.825，低于 0.86，正确进入原 OCR 回退。
+  因而初始图库不能保证新视角都走快速分支，需要补充当前相机照片。
+  同图路径对照：runs/reference_validation/same_fr3_image_route_comparison.json。
+  同图“抗病毒口服液”预热后、清空图片缓存的重新检测/编码/分割为 0.27-0.30 s；
+  原流程模型已加载的识别/分割为 24.02 s。同帧缓存命中 0.16 s。
+  新分支第一次调用约 15.9 s（含 MobileCLIP/SAM3 首次加载），此外还有检测器初始化。
+  这是一个保存场景中的一个目标，不含拍摄、任务 LLM/VDM、AnyGrasp、MoveIt、运动和预览等待。
+  无帧缓存报告：runs/reference_validation/warm_models_no_frame_cache.json。
+  119 项相关离线测试通过；汇总：runs/reference_validation/summary.json。
+  回退时会增加参考匹配尝试的开销；此版本没有改变原 OCR 内部的多候选策略。
+
+关闭与环境
+  把 config/perception/references.yaml 的 enabled 改成 false，重启 Agent，即恢复原识别路径。
+  可保留图库，不需删除旧技能或重装模型。
+  env_armcode_agent 已安装本地 mobileclip 和 open_clip_torch==2.32.0；未升级 Torch/CUDA/NumPy。
+  重建依赖时，在项目目录使用对应环境的 python -m pip install --no-deps \
+    -r requirements-reference-recognition.txt；本地 MobileCLIP 源码和权重仍需保留。
+  本轮修改前备份：/home/seur/data/wpy/backups/reference_recognition_20261014_162838。

@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv*/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Runtime outputs
+runs/
+logs/
+outputs/
+tmp/
+temp/
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+*.safetensors
+*.tar
+*.bin
+*.gguf
+*.h5
+*.hdf5
+
+# Large/local dependencies
+models/
+weights/
+checkpoints/
+third_party/
+external/
+*.so
+*.pyd
+*.dll
+*.dylib
+
+# ROS / build
+build/
+devel/
+install/
+log/
+
+# Secrets / licenses
+.env
+.env*
+!.env.example
+*.lic
+license/
+*.key
+*.pem
+*.public_key
+*.signature
+licenseCfg.json
+config/local.env
+*.local.yaml
+*.local.json
+
+# Local records
+.TimeRecord
+dependencies/
+
+# Device-specific profiles, calibrations and captured data stay on each machine.
+# Ignoring files does not remove files already in Git history; use the release exporter.
+config/hardware/fr3.yaml
+config/perception/references.yaml
+config/calibration/*.yaml
+!config/calibration/*.example.yaml
+config/calibration/*result*.json
+config/calibration/source/
+anyplace_real/config/real_saved_xarm_snapshot.json
+data/
+releases/
+dist/

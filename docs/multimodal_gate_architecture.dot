@@ -1,0 +1,59 @@
+digraph MultimodalGate {
+  graph [rankdir=LR, bgcolor="white", pad=0.25, nodesep=0.35, ranksep=0.55,
+         fontname="Noto Sans CJK SC", label="多模态 Gate：训练与推理数据边界", labelloc=t,
+         fontsize=20];
+  node [shape=box, style="rounded,filled", fontname="Noto Sans CJK SC", fontsize=11,
+        color="#315A7D", fillcolor="#EAF3FA", margin="0.12,0.08"];
+  edge [fontname="Noto Sans CJK SC", fontsize=9, color="#51606D"];
+
+  subgraph cluster_policy {
+    label="Policy Observation（部署时可用）";
+    color="#5B8DB8"; style="rounded,dashed";
+    rgb [label="当前 RGB\n原始图像"];
+    task [label="任务文字\n例：把西瓜霜放入容器"];
+    depth [label="对齐 Depth\n单位：m"];
+    history [label="最近 2–4 次观测\n+ 动作结果"];
+    state [label="机器人 / 任务状态\n持物、预算、节点、有效性"];
+    mask [label="Action Mask\n4 个动作是否可用"];
+  }
+
+  image_encoder [label="冻结图像编码器\n当前：MobileCLIP global\n目标：SigLIP2 patch tokens", fillcolor="#FFF1CC", color="#B27B16"];
+  text_encoder [label="冻结文本编码器\n中文能力必须实测", fillcolor="#FFF1CC", color="#B27B16"];
+  depth_encoder [label="Depth CNN\n空间 patch tokens", fillcolor="#E8F6EE", color="#39825B"];
+  history_encoder [label="共享图像编码 + 历史 token", fillcolor="#E8F6EE", color="#39825B"];
+  state_mlp [label="状态 MLP\n含缺失有效性位", fillcolor="#E8F6EE", color="#39825B"];
+
+  fusion [label="2 层轻量 Transformer\n跨模态融合", fillcolor="#EADFF7", color="#714797", penwidth=1.5];
+  decision [label="Decision Token", fillcolor="#EADFF7", color="#714797"];
+  qhead [label="4 个 Action Value\nEXECUTE / VISUAL / MANIP / REPLAN", fillcolor="#FBE2E2", color="#A64848"];
+  aux [label="训练辅助头\n可见性 / 确认 / Probe 增益\n可行性 / 风险", fillcolor="#F5EAF0", color="#94546F"];
+  apply_mask [label="强制应用 Action Mask", fillcolor="#D9EEF8", color="#247498", penwidth=1.5];
+  action [label="最终宏动作", shape=ellipse, fillcolor="#D9F2DF", color="#287B43", penwidth=2];
+
+  rgb -> image_encoder;
+  task -> text_encoder;
+  depth -> depth_encoder;
+  history -> history_encoder;
+  state -> state_mlp;
+  image_encoder -> fusion [label="视觉 token"];
+  text_encoder -> fusion [label="任务 token"];
+  depth_encoder -> fusion;
+  history_encoder -> fusion;
+  state_mlp -> fusion;
+  fusion -> decision;
+  decision -> qhead;
+  decision -> aux;
+  qhead -> apply_mask;
+  mask -> apply_mask;
+  apply_mask -> action [label="argmax"];
+
+  subgraph cluster_train {
+    label="仅训练 / 评价通道（部署时禁止输入）";
+    color="#C44C4C"; style="rounded,dashed";
+    truth [label="仿真 evaluator 真值", fillcolor="#FCE8E8", color="#C44C4C"];
+    labels [label="反事实标签\n成功、增益、耗时、风险", fillcolor="#FCE8E8", color="#C44C4C"];
+    truth -> labels;
+  }
+  labels -> qhead [style=dashed, color="#C44C4C", label="监督，不是输入"];
+  labels -> aux [style=dashed, color="#C44C4C"];
+}

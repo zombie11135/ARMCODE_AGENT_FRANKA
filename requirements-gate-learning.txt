@@ -1,0 +1,12 @@
+# Use in an isolated environment; tested in conda env armcode_recognition_v2.
+torch==2.5.1
+torchvision==0.20.1
+transformers==5.5.4
+timm==0.9.5
+open-clip-torch==2.32.0
+numpy==2.2.6
+Pillow==12.1.1
+pytest==8.4.2
+
+# MobileCLIP is reused from the vendored source tree and existing environment:
+# dependencies/yoloe/third_party/ml-mobileclip

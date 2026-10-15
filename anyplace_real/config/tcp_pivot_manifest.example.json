@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "example_only": true,
+  "pose_semantics": "T_base_flange_mmrad",
+  "teaching_poses_mmrad": [
+    {"name": "replace_pose_1", "pose": [350.0, 0.0, 450.0, 3.14, 0.0, -1.57]},
+    {"name": "replace_pose_2", "pose": [350.0, 0.0, 450.0, 2.80, 0.25, -1.40]},
+    {"name": "replace_pose_3", "pose": [350.0, 0.0, 450.0, -2.90, -0.20, -1.75]},
+    {"name": "replace_pose_4", "pose": [350.0, 0.0, 450.0, 3.00, 0.30, -1.90]}
+  ],
+  "tcp_orientation_rpy_rad": null,
+  "acceptance": {
+    "maximum_rms_residual_m": 0.002,
+    "maximum_single_residual_m": 0.004,
+    "minimum_orientation_spread_deg": 30.0
+  }
+}

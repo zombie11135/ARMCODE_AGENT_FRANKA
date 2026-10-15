@@ -1,0 +1,4 @@
+# Use together with the existing stack's compose.yaml, never on the real service.
+services:
+  fake:
+    command: [ros2, launch, /project/tests/fr3_inactive_mock.launch.py]

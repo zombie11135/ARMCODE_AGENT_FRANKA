@@ -1,0 +1,17 @@
+# Versions actually verified in the isolated Python 3.10.20
+# armcode_recognition_v2 conda environment. Install the CUDA-matched PyTorch
+# wheel first (verified: torch 2.5.1+cu121, torchvision 0.20.1+cu121), then
+# clone THU-MIG/yoloe at commit 40cd606 and install these editable paths.
+-e ./dependencies/yoloe
+-e ./dependencies/yoloe/third_party/CLIP
+-e ./dependencies/yoloe/third_party/ml-mobileclip
+-e ./dependencies/yoloe/third_party/lvis-api
+numpy==2.2.6
+opencv-python==4.13.0.92
+open3d==0.19.0
+pillow==12.1.1
+PyYAML==6.0.3
+open_clip_torch==2.32.0
+timm==0.9.5
+supervision==0.30.2
+pytest==8.4.2

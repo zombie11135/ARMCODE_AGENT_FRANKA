@@ -1,0 +1,8 @@
+# Python 3.9; installed only into .venv-gate-sim (never the shared/base env).
+numpy==1.26.4
+pybullet==3.2.7
+Pillow==10.4.0
+imageio==2.35.1
+imageio-ffmpeg==0.5.1
+# Acceptance/regression test runner (same local environment).
+pytest==8.3.5

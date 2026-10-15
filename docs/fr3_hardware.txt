@@ -1,0 +1,434 @@
+最新状态：完整 agent 接口已于 2026-10-13 接入，使用方法见 docs/fr3_agent.txt。
+本文件以下按阶段保留迁移记录；历史阶段的“未接入/阻止完整任务”不是当前状态。
+
+FR3 / Robotiq 2F-85 配置与接口迁移
+=================================
+
+1. 代码放在哪里、如何分工
+
+本项目：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+已验证的 FR3 ROS 2 工作区：/home/seur/data/wpy/armcode_agent
+
+Agent、感知模块和 USB 夹爪驱动在主机 conda 环境运行。
+ROS 2 Humble、MoveIt 2、franka_ros2 和 libfranka 继续在原 Docker 中运行。
+初始迁移没有重装 ROS、修改原 FR3 运动算法或连接真机。
+2026-10-13 用户移除多余夹爪后，补做了夹爪只读通信验证；没有发送运动或复位指令。
+
+调用链：
+  Python / CLI -> hardware.fr3.FrankaMoveItArm
+              -> docker compose exec -> hardware/fr3_worker.py
+              -> 原工作区 scripts/real_ptp.py 的 Session
+              -> MoveIt 2 -> FollowJointTrajectory -> ros2_control -> FR3
+
+worker 沿用原来的 OMPL RRTConnect 规划、近邻 IK 筛选、时间参数化、轨迹采样检查、
+末端误差检查与控制器清理。它不会自动启动 Docker 服务，也不会自动恢复机器人故障。
+每次 move 都从当时的状态重新规划，再执行一次；不保证与前一次 plan 的随机采样路径相同。
+此接口允许绕行，不承诺末端走直线。
+
+2. 配置入口
+
+config/hardware/fr3.yaml 是新硬件配置的唯一主入口：
+  arm.workspace                  原 Docker 工作区的绝对路径
+  arm.stack                      real 或 fake；CLI --stack 可覆盖
+  arm.speed_scaling              默认 0.10，MoveIt 速度/加速度缩放
+  arm.position_tolerance_m       默认 0.003 m
+  arm.orientation_tolerance_rad  默认 1 度，文件用弧度填写
+  arm.request_timeout_s          含规划与运动；超时会停止本次请求并清理控制器
+  arm.home_pose                  待配置，不使用旧 xArm home
+  gripper.port                   固定为剩余 RS-485 设备 DAAL8LK6 的 by-id 路径
+  gripper.speed_raw / force_raw  0..255 协议值，不是 mm/s 或牛顿
+  gripper.keepalive_interval_s   会话内只读保活周期，默认 0.1 s
+  gripper.startup_timeout_s      首次连接用只读轮询等待 0x09 清除的最长时间，默认 1 s
+  gripper.state_timeout_s        状态更新/缓存过期阈值，默认 0.5 s
+  cameras                        两台相机的序列号和已测试的 640x480 / 6 FPS 配置
+  perception                     模型路径占位；本阶段不切换抓取算法
+  calibration_file              已指向 ../calibration/fr3_handeye.yaml，相对硬件 YAML 所在目录解析
+
+相机 global / wrist 的分配按此前画面暂定，标定前需要确认实际安装角色。
+旧 --xarm_ip、--handeye_config、ROS 1 夹爪与旧设备序列号等参数仅用于 --legacy-xarm。
+新 FR3 模式以上述 YAML 为准；LLM/API 等非硬件参数仍沿用现有入口与环境变量。
+没有把 API 密钥写进配置文件。
+
+工作台、夹爪碰撞模型继续由原工作区 config/workcell.json 管理，避免维护两套值：
+  桌面：fr3_link0 的整个 z=0 平面，另加 0.01 m 净空。
+  工具：直装、法兰到最远端 0.17 m（2026-10-14 用户重新测量）、最大外宽 0.10 m，另加 0.005 m 包围体余量。
+这是碰撞包围体，不是 TCP 或手眼标定。
+速度缩放之后还会应用原客户端的轨迹速度、加速度、jerk 检查，耗时不一定按缩放线性变化。
+
+3. 先检查配置
+
+  cd '/home/seur/data/wpy/armcode-agent (1)/armcode-agent'
+  conda activate /home/seur/data/wpy/conda_envs/env_armcode_agent
+  python -m hardware.cli config
+  python -m hardware.cli --help
+
+也可直接使用上述 Python 绝对路径，不需要在主机 source ROS 环境。
+导入模块、创建适配器、打印配置均不会连接设备。
+主机适配层所需依赖记录在 requirements-hardware.txt，当前 conda 环境已具备，无需重复安装。
+
+4. 假硬件测试
+
+先启动没有外部网络的 fake 容器，控制器从 inactive 状态开始：
+
+  docker compose \
+    -f /home/seur/data/wpy/armcode_agent/compose.yaml \
+    -f '/home/seur/data/wpy/armcode-agent (1)/armcode-agent/config/hardware/fake.override.yaml' \
+    up -d --no-build fake
+
+在本项目根目录执行：
+
+  python -m hardware.cli arm pose --stack fake
+  python -m hardware.cli arm plan 0.31 0 0.59 3.14159265359 0 -0.785398163397 --stack fake
+  python -m hardware.cli arm move 0.31 0 0.59 3.14159265359 0 -0.785398163397 --stack fake --execute
+
+上面的数值仅为假硬件默认姿态附近的例子，不作为真机推荐目标。
+fake 模式还会验证 robot_description 使用 mock_components/GenericSystem，模式不符就报错。
+不要用旧默认 fake 启动命令替换 override：旧默认会激活控制器，与新接口的生命周期冲突。
+
+离线测试与集成测试：
+
+  python -m unittest discover -s tests -p test_fr3_hardware.py -v
+  python tests/fr3_mock_smoke.py
+
+集成测试硬编码 fake：读取位姿、仅规划、模拟执行、碰撞目标拒绝、Ctrl-C 取消和停止控制器。
+结果保存到 runs/hardware_validation/fr3_mock_smoke.json。
+这不是动力学仿真或真机精度验证。
+
+结束时只停 fake：
+  docker compose -f /home/seur/data/wpy/armcode_agent/compose.yaml stop fake
+
+5. 真机基座系法兰位姿接口（由操作者执行）
+
+沿用原来的 FCI、工具负载配置和启动方式，在原工作区执行：
+  cd /home/seur/data/wpy/armcode_agent
+  bash scripts/real.sh start
+  bash scripts/real.sh status
+
+随后在本项目根目录：
+  python -m hardware.cli arm pose --stack real
+  python -m hardware.cli arm plan X Y Z RX RY RZ --stack real
+  python -m hardware.cli arm move X Y Z RX RY RZ --stack real --execute
+
+X 等符号需替换为你确认过的数字。单位为米、弧度。
+基座坐标系固定 fr3_link0，目标固定 fr3_link8 法兰；不是夹爪指尖。
+RPY 为固定轴 XYZ 欧拉角，R = Rz(rz) * Ry(ry) * Rx(rx)。
+plan 不激活控制器；move 才激活并执行。完成后会验证末端到位、静止、控制器 inactive。
+控制器原本 active 或有其他运动客户端时会拒绝，不自动抢占。
+Ctrl-C 会通知当前请求在容器内取消自己的轨迹并停用控制器，不会自动重试。
+若无法确认远端清理，程序会明确报错，需查看 Desk 与原工作区 status。
+
+返回 JSON 中 host_log_path 指向原工作区 logs/agent/<请求ID>.jsonl。
+日志保持原预览格式；要在 RViz 回放某次计划，在原工作区运行：
+  bash scripts/preview.sh logs/agent/<请求ID>.jsonl
+这里要传具体日志路径；preview.sh latest 仍只查原来的 logs/real。
+回放不执行动作，后续 move 会重新规划。
+
+6. Robotiq 2F-85 独立接口
+
+  python -m hardware.cli gripper ports
+
+这个命令只列出系统端口，不打开串口。
+用户移除多余夹爪后，系统只剩下以下 USB/RS-485 设备，已写入 YAML：
+  /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DAAL8LK6-if00-port0
+
+已在 115200、8N1、Modbus slave 9 下确认状态寄存器可读。
+如果设备改过地址或波特率，也需填实际值。
+
+  python -m hardware.cli gripper status
+  python -m hardware.cli gripper check --duration 120 --interval 0.1
+
+check 仅持续读取状态寄存器，不接受 --execute，也不会激活、开合或复位。
+其传输层只允许 FC03 读取 0x07D0 开始的三个寄存器，其它请求会直接拒绝。
+每 10 秒打印进度，结束后返回 JSON；逐次采样 JSONL 和统计 JSON 保存到
+runs/hardware_validation/robotiq-comm-<时间戳>.*，可用 --output-dir 指定目录。
+统计包含成功/失败次数、响应时间、最大读取间隔、故障码和位置编码范围。
+首次两秒内的 0x09 单独记录，稳定阶段再出现故障或任何读取错误都会使检查不通过。
+communication_passed 表示通信检查通过；all_steady_samples_ready 单独表示夹爪是否就绪，
+未激活但正常响应的夹爪也可以通过通信检查。读取异常不自动重连、清错或重试。
+命令结束就关闭串口；它不是 Agent 的后台保活服务，也不证明机械开合或夹持力正常。
+
+2026-10-13 18:16（Asia/Shanghai）实测：120 秒、目标 10 Hz，1198 次查询全部成功，
+稳定阶段 1178 次采样均无故障且 ready=true。首帧 0x09，约 0.10 秒后仅靠读取恢复 0x00。
+响应中位数 10.65 ms、P95 17.85 ms、最大 18.97 ms；最大查询间隔 100.31 ms。
+位置编码始终为 3，电流读数始终为 0，gGTO 始终为 0；没有发送写寄存器请求。
+报告：runs/hardware_validation/robotiq-comm-20261013-181610-281426.json
+逐次日志：同名 .jsonl。结论仅适用于本轮静止状态通信测试，不代表长期或高负载验证。
+
+推荐使用常驻终端测试；启动只建立只读通信，不自动激活或开合：
+
+  python -m hardware.cli gripper console --execute --speed-raw 32 --force-raw 32
+
+进入 robotiq> 提示符后，由操作者逐条输入（先空载测试）：
+  status
+  open
+  close
+  move 128
+  open
+  quit
+
+如果 status 显示未激活，需你显式输入 activate，然后重新查看 status。
+已激活且正常的夹爪不会因 activate 命令而重复标定。
+console 不加 --execute 则为只读终端，即使输入 open/close 也会被拒绝。
+命令等待输入期间、每个动作期间及两个动作之间均持续只读保活。
+不要同时打开两个夹爪终端或运行其它串口客户端，端口为独占访问。
+stop 停止夹爪；Ctrl-C 在动作等待期间会尝试停止该动作并返回提示符，
+在等待输入时按 Ctrl-C 则退出会话。quit/退出不自动张开，退出后不再保活。
+
+open 32 32、close 32 32、move 128 32 32 可以覆盖本次动作的速度和力度。
+所有数值均为 0..255 协议编码，不是毫米、mm/s 或牛顿；128 不是经过标定的精确半开宽度。
+每个动作会等到位置到达或接触停止后返回状态；empty close 可完成动作但不会标为检测到物体。
+后台通信异常会保持故障记录并阻止新动作，不因后来的好数据而悄悄清除。
+排查后可显式输入 reconnect，只重开通信并重新读取，不复位夹爪、不重试之前的动作。
+session.error、monitor_alive、last_status_age_s 和 write_register_requests 可以用于诊断。
+终端命令和结果会保存到 runs/gripper/session-<时间戳>.jsonl。
+
+也支持以下一次性命令，由操作者单独执行；它们完成后会结束当前串口会话：
+  python -m hardware.cli gripper activate --execute
+  python -m hardware.cli gripper open --execute
+  python -m hardware.cli gripper close --execute
+  python -m hardware.cli gripper move 128 --execute
+  python -m hardware.cli gripper stop --execute
+
+status 读取原始状态寄存器，不启动后台保活。activate 在未激活时会执行自身标定运动，必须由操作者显式执行。
+open/close 不会隐式激活。动作建立会话时，首读 0x09 只通过后续只读查询等待恢复；不写复位寄存器。
+其它故障、启动 0x09 持续超时、已建立会话后再次出现 0x09 都会阻止新动作，不自动恢复或重试。
+运动超时/中断会尝试清除 rGTO 停止本次运动，不自动张开。
+
+返回 activated、activation_state、go_to、fault、position_raw、requested_position_raw、
+current_ma、object_state_label、object_detected_closing 等字段。
+0..255 是位置编码值；不把它当成精确夹距，也不把电流当成测得的夹持力。
+object_detected_closing 仅表示闭合时检测到接触，不是抓取成功的视觉证明。
+Agent 按用户要求在正常闭合完成后继续，允许“闭合到底且没有检测到接触”；接触状态仍按实际记录。
+端口独占打开、CRC/应答地址/功能码/写入确认均校验。
+
+协议依据：Robotiq 官方 2F-85 / 2F-140 手册 Control 章节。
+https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_Instruction_Manual_Gen_HTML_20190524.zip/2F-85_2F-140_Instruction_Manual_Gen_HTML/Content/4.%20Control.htm
+本阶段已完成协议离线测试与实机只读通信验证，尚未进行夹爪实机开合。
+只读记录：runs/hardware_validation/robotiq_status_20261013.json。
+首读 gFLT=0x09（官方手册：至少 1 秒没有通信），继续只读轮询后恢复 0x00、ready=true。
+没有发送清错/复位/激活指令。这个瞬时 ready 结果不代表以后每次首次读取也会无故障。
+串口会话内的周期状态读取已接入，机械臂运动或模型推理期间可由独立线程保持通信。
+首次连接的 0x09 与运行中通信失效分开处理，不应反复激活来绕过故障。
+gGTO=0 时 gOBJ 无效，新状态输出会标为 not_applicable，不把它解释成夹爪正在运动。
+
+常驻会话验证：真实只读终端等待输入期间累计 1218 次状态读取，写寄存器请求为 0，
+退出后后台线程停止。日志：runs/gripper/session-20261013-182913-147658.jsonl。
+最终版本另做前台每次阻塞 10 秒的 30 秒测试，后台累计读取 301 次，始终无故障，
+位置编码保持 3；报告：runs/hardware_validation/robotiq_session_keepalive_20261013.json。
+离线覆盖：29 项硬件接口测试、21 项会话/动作/并发测试、5 项只读诊断测试，全部通过。
+复查命令：
+  python -m unittest discover -s tests -p test_robotiq_session.py -v
+
+7. Python 接口
+
+  from hardware.config import load_config
+  from hardware.fr3 import FrankaMoveItArm
+  from hardware.interfaces import Pose6D
+  from hardware.robotiq import Robotiq2F85
+
+  cfg = load_config()
+  arm = FrankaMoveItArm(cfg.arm, stack='fake')
+  current = arm.get_pose()
+  target = Pose6D(current.x + 0.005, current.y, current.z,
+                  current.rx, current.ry, current.rz)
+  plan = arm.plan_pose(target)
+
+调用 move_pose 必须构造 execution_enabled=True 的适配器。
+Robotiq2F85 同样默认禁止动作；状态读取可以不启用 execution_enabled。
+使用 with Robotiq2F85(cfg.gripper) as gripper 可在结束后关闭串口。
+夹爪 close() 表示闭合，disconnect() 才是关闭串口。
+
+常驻 Python 用法（动作行由操作者执行）：
+
+  with Robotiq2F85(cfg.gripper, execution_enabled=True) as gripper:
+      state = gripper.start_session()  # 仅通信握手和只读保活，不自动激活
+      print(state.to_dict())
+      # gripper.activate()             # 只有确认需要激活时显式调用
+      gripper.open(speed_raw=32, force_raw=32)
+      gripper.move_raw(128, speed_raw=32, force_raw=32)
+      result = gripper.close(speed_raw=32, force_raw=32)
+      print(result.to_dict())
+      gripper.assert_healthy(require_ready=True)
+      # 此处执行其它任务时，后台状态读取仍然运行。
+
+start_session() 也能在 execution_enabled=False 时使用，动作接口仍被禁止。
+各动作本身会在首次调用时建立会话。后台读写和前台命令共用锁，防止 Modbus 数据交错。
+disconnect() 先结束轮询线程再关闭串口，不发送释放或开合指令。
+
+core.RuntimeContext 新增 arm / gripper / transforms 三个字段。
+hardware.runtime.build_hardware(...).attach(context) 可注入新接口。
+attach(context, monitor_gripper=True) 会建立夹爪会话并检查就绪；FR3 运行时已接入此模式，
+disable_grip 时不连接夹爪。完整任务仍受未完成的标定/坐标迁移检查限制。
+旧技能使用的机械臂适配器会在移动前后检查夹爪会话健康；通信异常阻止后续步骤。
+本轮没有实现夹爪故障触发正在执行的 FR3 轨迹自动取消，不把这项前后检查当作联动急停。
+LegacyPoseAdapter 只兼容旧技能的 get_position / set_position，转换毫米到米；
+不伪装完整 xArm SDK。旧速度参数会提示忽略，实际用 YAML 的 MoveIt 缩放。
+输入必须已经是 FR3 基座系法兰位姿；单位转换不等于坐标变换。
+
+8. 坐标变换与尚待迁移的部分
+
+手眼变换已加载，纯计算实现位于 hardware/transforms.py，接口位于 hardware/interfaces.py：
+  Transforms.camera_point_to_base(...)
+  Transforms.camera_grasp_to_flange_pose(...)
+  Transforms.tcp_to_flange_pose(...)
+build_hardware() 将 CalibratedTransforms 注入 context.transforms；calibration_file 为 null
+时才使用 PendingTransforms。实际配置为 config/calibration/fr3_handeye.yaml。
+相机点到基座点已经可用；抓取姿态到法兰的计算需要 T_flange_tcp、T_grasp_tcp 均已配置。
+T_flange_tcp 已按用户提供的约 18 cm 距离配置；T_grasp_tcp 已按法兰 X 开合轴配置名义对齐，
+状态为 nominal_preview，alignment_verified=false。两矩阵可用于几何计算/预览，
+require_ready() 只检查矩阵齐全，不表示真实安装角或端到端抓取精度已经验证。
+18 cm 是初值，不是已测得的精确值；若缺少矩阵，不会把 null 当作单位矩阵。
+旧技能中的 xArm 高度修正、观察位/避障位与抓取调用仍待迁移。完整任务还保留独立的迁移检查，
+即便将来填齐 TCP 矩阵，也不会自动启用旧动作链。
+统一约定为列向量 p_parent = T_parent_child @ p_child，平移使用米。
+随手相机使用拍照时的机械臂位姿；接口不自动读取运动后的当前位姿。
+点云使用彩色光学坐标系。当前相机服务将深度对齐到彩色，并提供对齐后的深度内参。
+坐标转换调用必须提供实际 device_serial 和 optical_frame，拒绝另一台相机或深度光学帧。
+工具 TCP 和抓取模型坐标轴对齐独立于手眼标定；0.17 m 碰撞长度不能直接替代这两项。
+这也是完整视觉抓放任务当前会提前停止的原因。独立 arm/gripper 命令不依赖手眼标定。
+
+主入口默认选择 FR3 配置和 SimpleArmCodeAgentSystem；/home、/open、/close 也已改走新适配器。
+/home 还需填写 home_pose；/open /close 不自动激活夹爪，通信或设备故障时明确报错。
+可用 --no_run_executor 继续生成任务图和 grasp/place 动作脚本；本阶段尚不能执行完整视觉抓放。
+原完整代码生成器与 skill_lab 中独立 xArm 调试脚本保留，未宣称它们都已适配 FR3。
+显式 --legacy-xarm 才使用主入口原有 xArm/ROS 1 行为。
+
+本次改动前的五个已有文件备份：
+  runs/migration_backups/fr3_interfaces_20261013/
+其中 sha256.json 记录了备份文件散列。不要用 git reset 覆盖原先未提交的其它改动。
+
+9. 下一步复现顺序
+
+第一步：夹爪持续通信/状态维护与动作接口已接入，操作者已反馈接口实测成功。
+第二步：把已独立测试的抓取后端接入 Agent 服务接口。当前 runtime 仍构造 AnyGraspService，
+        GSNet 尚未接入。先验证两台相机角色、深度单位、模型输入、候选位姿/开口宽度/分数，
+        只保存和显示候选，不执行机械臂运动。模型路径目前仍待配置。
+第三步：camera -> base 已接通，用户已在另一台电脑用此手眼结果完成抓取，本次不重复验证手眼。
+        TCP 平移先用用户给出的 [0, 0, 0.18] m，名义对齐选开合沿法兰 X，下一步做抓取姿态预览。
+        然后替换旧技能里的 xArm 轴对齐、0.12 m 夹爪补偿、高度修正和旧观察位。
+第四步：建立一个确定目标的抓取/放置序列，先逐段 MoveIt 规划与 RViz 预览，再由操作者逐段执行。
+        确认 home/观察位、预抓取位、抓取位、抬升位、放置位及失败时的停止行为。
+第五步：将验证后的动作接回 observe/grasp/place，最后测试自然语言任务规划、多目标任务和失败反馈。
+        先让确定性动作链正常工作，再开放完整 Agent 调用真机。
+
+10. 手眼结果导入记录
+
+用户提供：/home/seur/下载/handeye_result.json
+原样归档：config/calibration/fr3_handeye_result.json
+当前加载的配置：config/calibration/fr3_handeye.yaml
+标定脚本原样归档：config/calibration/source/handeye_calibration.py（未运行采集程序）
+离线检查记录：runs/hardware_validation/fr3_handeye_import.json
+
+源文件声明 eye-in-hand，PARK 方法，20 个样本，gripper_T_camera 将相机坐标映射到
+标定所用的 gripper 坐标系。矩阵平移为 [31.2869, -72.7058, 19.0194] mm。
+4x4 结构、有限数值、旋转正交性、行列式 +1、齐次末行及重复字段一致性检查通过。
+源文件报告平移 RMS 2.2711 mm、最大 5.4715 mm，旋转 RMS 1.8785°、最大 4.0904°。
+脚本已确认这些是参与求解的样本所得到的固定标定板位姿一致性残差；没有原始样本，
+助手尚未独立复算。用户随后确认已在另一台电脑完成抓取验证，要求直接沿用，本次不再要求
+重复手眼验证。这些残差不是最终抓取精度。
+
+本次提供的 handeye_calibration.py 第 247 行读取 state.O_T_EE，并按列主序还原矩阵；
+第 339 行启用 RealSense 彩色流，第 720 行调用 OpenCV calibrateHandEye。
+因此 gripper_T_camera 是 T_EE_camera_color，而非预先定义的 Robotiq 抓取 TCP 外参。
+历史真机状态 logs/diagnostics/state-20261011-134227.json 记录 F_T_EE 为单位矩阵；
+用户已确认相机安装与 Franka Desk 末端/TCP 设置从标定到现在没有变化，因此将此桥接矩阵
+用于本次标定。转换后的 T_fr3_link8_camera_color 与原矩阵数值相同，并保留了原始数据与依据。
+
+相机绑定沿用硬件 profile：wrist=349622072103。用户确认标定属于手腕相机，
+原始采样文件尚未提供，序列号沿用当前硬件 profile 的 wrist 绑定。global 相机未标定，不提供变换。
+wrist_color_optical_frame 是接口的逻辑帧名，不意味着 ROS 中已发布同名 TF。
+
+完整眼在手上变换链（列向量，矩阵平移单位米）为：
+  T_base_camera = T_base_link8_at_capture @ T_link8_gripper @ T_gripper_camera
+  T_base_tcp = T_base_camera @ T_camera_grasp @ T_grasp_tcp
+  T_base_link8_target = T_base_tcp @ inverse(T_link8_tcp)
+本次已按上述证据将 T_link8_gripper 设为单位矩阵；此设置不能替代工具抓取 TCP。
+拍照时机械臂位姿、工具 TCP、模型抓取轴对齐仍需与实际安装匹配。
+
+离线检查命令（在旧 Agent 项目根目录、env_armcode_agent 环境运行）：
+  python -m hardware.cli calibration inspect
+
+纯计算示例，下列数值是演示输入，不是机械臂运动目标：
+  python -m hardware.cli calibration point 0 0 0.30 \
+    --flange-pose 0.35 0 0.50 3.14 0 -1.57 \
+    --serial 349622072103 --frame wrist_color_optical_frame
+真实使用时，point 为彩色光学坐标系下的点，--flange-pose 必须来自同次静止拍照时刻。
+该命令不连接设备、不启动 Docker、不读取实时位姿，也不规划或执行运动。
+
+14 项新增离线测试覆盖旋转坐标变换、非零工具偏移与模型轴对齐、相机/帧不匹配、
+缺失 TCP、非法矩阵、相对路径及完整任务保持禁用；连同已有硬件测试共 69 项通过。
+本次已修改 calibration_file 并接入坐标计算，没有连接设备或发送运动指令。
+完整自动抓取仍需 GSNet 服务接入、坐标轴对齐及技能迁移。
+
+11. 18 cm TCP 初值与开合轴对照
+
+用户说明法兰到实际抓取中心约 18 cm、没有横向偏移，且为直装。
+当前 T_flange_tcp 平移为 [0, 0, 0.18] m，旋转为单位矩阵。
+这里的单位旋转是软件对 TCP 坐标轴的定义：三根轴保持与 fr3_link8 平行，只平移原点。
+它不表示真实夹爪开合方向已经与法兰 X 或 Y 轴对齐。
+原 workcell.json 中 0.19 m 工具碰撞包围体保持原值；TCP 长度不改变最远端碰撞体积。
+
+此前用户不确定法兰系开合方向时，准备了如下对照命令。在 env_armcode_agent 中执行：
+  python -m hardware.cli calibration axes --current-pose
+该命令仅请求已有适配器的 get_pose；要求 ROS 真机栈已运行且状态可读，不会自动启动栈，
+不激活控制器、不规划、不发送运动或夹爪指令、不修改 TCP 或对齐配置。
+输出 flange_axes_in_base 是法兰 X/Y/Z 在基座坐标系中的方向，
+candidates 给出“开合沿法兰 X”和“开合沿法兰 Y”两种假设对应的基座方向。
+对照两指之间的连线，不要把手指伸出去的长度方向当作开合方向。
+两候选仅供比较；实际安装也可能相对 X/Y 为斜角。相反方向描述同一条开合直线，
+但可能对应相差 180° 的法兰姿态，需要后续规划检查与择优，不自动猜一个方向执行。
+
+如果已知当前法兰位姿，可完全离线计算。例如以下仅为演示输入，不会移动到该姿态：
+  python -m hardware.cli calibration axes --flange-pose 0.35 0 0.5 3.141592653589793 0 -1.5707963267948966
+这个示例下，法兰 +X 约指向基座 -Y，法兰 +Y 约指向基座 -X，工具向基座 -Z 伸出。
+--closing-axis-flange DX DY DZ 可输入观察到的方向，输出对应旋转候选，但仍不写入配置。
+
+GSNet 的 Gx 为接近方向，Gy 为两指连线，Gz=Gx×Gy。
+直装时，接近方向 a_F=[0,0,1]，若实际开合方向为 b_F，则：
+  R_flange_grasp = [a_F, b_F, a_F×b_F]
+  R_grasp_tcp = transpose(R_flange_grasp)  （因本项目定义 R_flange_tcp=I）
+长度补偿通过 T_base_tcp @ inverse(T_flange_tcp) 应用，随法兰姿态一起旋转，
+不会固定从基座 z 坐标减去 0.18 m，也不会在模型对齐矩阵中再次扣除这段长度。
+
+旧 skill_lib/manipulation/plan_grasp_with_anygrasp.py 保留原 xArm 的额外 -90° 与 0.12 m
+补偿；这些属于显式 legacy 入口，不能直接搬到新 FR3 链路。新对齐工具不调用该旧变换。
+模型的 depth 参数与最终选用的抓取参考点将在 GSNet 服务接入时单独处理，不混入安装角度。
+
+本轮 15 项变换测试、6 项开合轴测试与 29 项已有硬件测试通过；未执行 --current-pose 真机读取。
+
+后续新增：已知开合连线沿基座 Y 轴时，无须自行判断法兰 X/Y。保持观察时的机械臂姿态，运行：
+  python -m hardware.cli calibration axes --current-pose --closing-axis-base 0 1 0
+变换采用 b_flange = transpose(R_base_flange) @ b_base，平移不参与方向变换。
+输出 observed_base_line 内含相对法兰 X/Y 的夹角，以及与法兰 XY 平面的偏离角。
+目视“沿 Y”可能只是近似描述；工具会明确报告投影误差，不自动把它当作精确标定。
+两指连线没有正负方向之分，因此输出两个相反方向的候选；不自动写入对齐矩阵。
+如果读取前机械臂已改变姿态，应使用观察时的 --flange-pose 参数，而不能套用新姿态。
+例如 RPY=[pi,0,-pi/2] 时，基座 +Y 对应法兰 -X，即开合直线平行法兰 X；
+这是条件示例，不能仅凭先前运动命令假定它仍是当前姿态。
+
+12. 根据实测法兰姿态设置名义对齐
+
+操作者运行只读 axes 命令后提供的法兰姿态：
+  [0.39402507497933753, 0.008418649715648166, 0.47132772482611995,
+   -3.0501071824902737, 0.008639370688073515, -1.3538205066225475]
+对应日志：原 ROS 工作区 logs/agent/80f0ccc9a1264ed8989369bbd920a6a7.jsonl。
+用户补充“两指连线沿基座 Y”只是大致观察，不是精确平行。
+此姿态下法兰 X 的基座方向为 [0.2152693, -0.9765165, -0.0086393]，与观察相符。
+按“严格平行基座 Y”反算出的 12.3387°、离开法兰 XY 平面的 1.6084°，
+不能视为实测安装偏角或手眼误差；没有应用这些角度去修改手眼或 TCP。
+
+配置先采用法兰 +X 作为名义开合轴、法兰 +Z 作为接近轴：
+  R_grasp_tcp = [[0,0,1], [1,0,0], [0,1,0]]
+  T_grasp_tcp 的平移 = [0,0,0]
+这里 +X 是给无方向的开合直线选定一个符号约定；相反符号对应另一种 180° 抓取姿态，
+可在后续规划中比较可达性/碰撞，不代表测出了哪根手指是正方向。
+T_grasp_tcp 不再包含旧代码的 -0.12 m 偏移，也不额外旋转 -90°。
+唯一工具长度补偿来自 inverse(T_flange_tcp)，当前为 0.18 m。
+输入 camera_grasp 的原点需已表达为所选的名义抓取中心；GSNet 的 depth/指尖参考点转换
+仍待服务层接入处理，当前配置没有宣称完整抓取流程已可执行。
+
+几何配置 status=geometry_preview_ready，grasp_model.alignment_status=nominal_preview，
+alignment_verified=false；calibration inspect 会同时打印矩阵和这些状态。
+全任务迁移检查继续阻止旧 xArm 技能链调用真机。
+详细观察与决策记录：runs/hardware_validation/fr3_jaw_axis_observation.json。
