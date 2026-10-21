@@ -1,0 +1,13 @@
+{
+  "schema": "static_camera_pair_v1",
+  "status": "pending_measurement",
+  "camera_serials": {
+    "global": "SET_GLOBAL_CAMERA_SERIAL",
+    "wrist": "SET_WRIST_CAMERA_SERIAL"
+  },
+  "translation_unit": "m",
+  "matrix_convention": "p_global = T_global_from_wrist @ p_wrist",
+  "validity": "both_camera_poses_unchanged",
+  "T_global_optical_from_wrist_optical": null,
+  "note": "Measure this relative pose with a board seen by both cameras. Do not substitute simulation poses or identity. Wrist motion invalidates this static calibration."
+}

@@ -32,6 +32,22 @@ def test_export_keeps_new_source_and_templates_only(tmp_path):
         export(root, destination)
 
 
+def test_export_includes_robocasa_and_occlusion_entry_points(tmp_path):
+    root = tmp_path / 'workspace'
+    sources = ('robocasa_occlusion/environment.py', 'robocasa_occlusion/upstream.lock.json',
+               'occlusion_reasoning/scene.py', 'run_robocasa_scene.sh',
+               'run_occlusion_camera_test.sh')
+    for name in sources:
+        write(root, name)
+    write(root, 'robocasa_occlusion/__pycache__/environment.pyc')
+    write(root, 'runs/robocasa_scene/evaluation.json')
+    destination = tmp_path / 'release'
+    assert export(root, destination) == len(sources)
+    assert set(sources) <= {p.relative_to(destination).as_posix() for p in destination.rglob('*') if p.is_file()}
+    assert not (destination / 'runs').exists()
+    assert not (destination / 'robocasa_occlusion/__pycache__').exists()
+
+
 def test_credential_blocks_export_without_printing_value(tmp_path):
     token = "sk-" + "x" * 30
     root = tmp_path / "workspace"

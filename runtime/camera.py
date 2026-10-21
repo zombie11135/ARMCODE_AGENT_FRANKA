@@ -1,15 +1,16 @@
 """Camera views used by a task; device construction lives in runtime.services."""
 from __future__ import annotations
 
+from runtime.observation_memory import memory_for
+
 
 class TaskCachedCamera:
     """
-    One-task image cache used by the simple runtime.
+    Legacy opt-in task snapshots; calibrated FR3 delegates to pose-aware memory.
 
-    The first home-view global/wrist captures are often the cleanest view of
-    containers and medicines. The runtime enables this cache only for the first
-    attempt of container pre-observation and medicine grasp localization, then
-    falls back to live captures if that attempt fails.
+    Initial task snapshots have no freshness or pose checks of their own. They
+    are never used for a camera with calibrated observation memory, including
+    when its policy is disabled (which means live captures).
     """
 
     def __init__(self, camera):
@@ -29,11 +30,15 @@ class TaskCachedCamera:
         self.enabled = False
 
     def capture_global(self):
+        if memory_for(self.camera) is not None:
+            return self.camera.capture_global()
         if self.enabled and self.cached_global is not None:
             return dict(self.cached_global)
         return self.camera.capture_global()
 
     def capture_wrist(self):
+        if memory_for(self.camera) is not None:
+            return self.camera.capture_wrist()
         if self.enabled and self.cached_wrist is not None:
             return dict(self.cached_wrist)
         return self.camera.capture_wrist()

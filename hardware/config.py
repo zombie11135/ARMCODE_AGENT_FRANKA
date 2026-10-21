@@ -7,6 +7,7 @@ from typing import Optional
 import yaml
 
 from .interfaces import Pose6D
+from runtime.observation_memory import ObservationCachePolicy
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "config/hardware/fr3.yaml"
@@ -44,6 +45,8 @@ class GripperConfig:
     # Current-based closing protection, not a calibrated fingertip force sensor.
     close_current_limit_ma: Optional[int] = None
     feedback_log_dir: Optional[str] = None
+    # Opt-in Agent close implementation; path resolves relative to this YAML.
+    contact_close_file: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -55,10 +58,12 @@ class CameraSettings:
     height: int = 480
     fps: int = 6
     show_window: bool = False
+    mode: str = 'dual'
 
 
 @dataclass(frozen=True)
 class PerceptionSettings:
+    parallel_candidate_workers: int = 2
     grasp_backend: str = "gsnet"
     gsnet_root: str = "/home/seur/data/wpy/conda_envs/env_armcode_agent/src/gsnet"
     sam3_model_dir: str = "/home/seur/data/wpy/models/sam3"
@@ -76,6 +81,7 @@ class HardwareConfig:
     gripper: GripperConfig = field(default_factory=GripperConfig)
     cameras: CameraSettings = field(default_factory=CameraSettings)
     perception: PerceptionSettings = field(default_factory=PerceptionSettings)
+    observation_cache: ObservationCachePolicy = field(default_factory=ObservationCachePolicy)
     calibration_file: Optional[str] = None
     schema_version: int = 1
 
@@ -118,9 +124,18 @@ def load_config(path=None) -> HardwareConfig:
         raise ValueError("Hardware configuration must be a mapping")
     raw = dict(raw)
     for name, cls in [("arm", ArmConfig), ("gripper", GripperConfig),
-                      ("cameras", CameraSettings), ("perception", PerceptionSettings)]:
+                      ("cameras", CameraSettings), ("perception", PerceptionSettings),
+                      ("observation_cache", ObservationCachePolicy)]:
         raw[name] = _section(cls, raw.get(name, {}))
     cfg = _section(HardwareConfig, raw)
+    if cfg.gripper.contact_close_file is not None:
+        value = cfg.gripper.contact_close_file
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError('gripper.contact_close_file must be null or a nonempty path string')
+        contact = Path(value).expanduser()
+        if not contact.is_absolute():
+            contact = path.parent / contact
+        cfg = replace(cfg, gripper=replace(cfg.gripper, contact_close_file=str(contact.resolve())))
     if cfg.perception.reference_config is not None:
         reference = Path(cfg.perception.reference_config).expanduser()
         if not reference.is_absolute():
@@ -129,6 +144,8 @@ def load_config(path=None) -> HardwareConfig:
     validate_gripper_feedback(cfg.gripper)
     if cfg.perception.grasp_backend not in ("gsnet", "anygrasp"):
         raise ValueError("perception.grasp_backend must be gsnet or anygrasp")
+    if type(cfg.perception.parallel_candidate_workers) is not int or not 1 <= cfg.perception.parallel_candidate_workers <= 4:
+        raise ValueError('perception.parallel_candidate_workers must be an integer in [1, 4]')
     if cfg.schema_version != 1 or cfg.arm.stack not in ("real", "fake"):
         raise ValueError("Expected schema_version: 1 and arm.stack: real or fake")
     if cfg.arm.singularity_screening not in ('endpoint', 'advisory'):
@@ -165,6 +182,8 @@ def load_config(path=None) -> HardwareConfig:
             raise ValueError(f"Invalid cameras.{name}")
     if type(cfg.cameras.show_window) is not bool:
         raise ValueError("cameras.show_window must be a boolean")
+    if cfg.cameras.mode not in ('wrist', 'dual'):
+        raise ValueError('cameras.mode must be wrist or dual')
     for name in ("global_serial", "wrist_serial"):
         if not isinstance(getattr(cfg.cameras, name), str) or not getattr(cfg.cameras, name):
             raise ValueError(f"cameras.{name} must be a quoted serial string")

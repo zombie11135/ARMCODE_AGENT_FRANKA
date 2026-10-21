@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.observation_memory import scene_mutation
 
 
 FALLBACK_INTRINSICS = {
@@ -353,6 +354,7 @@ class ClearOcclusionToBufferSkill(BaseSkill):
             **kwargs,
         )
 
+    @scene_mutation('clear_occlusion')
     def _execute_to_buffer(
         self,
         plan: Dict[str, Any],

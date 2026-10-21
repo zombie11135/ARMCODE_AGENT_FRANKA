@@ -112,6 +112,9 @@ def build_execution_context(config, *, camera, event_callback=None):
     ocr_params = {"lang": "ch", "device": "cpu", "use_textline_orientation": True}
     ocr = build_lazy_ocr(ocr_params)
     anygrasp = build_grasp_service(config)
+    workers = getattr(camera, 'perception_workers', 1)
+    if type(workers) is not int:
+        workers = 1
     return (
         RuntimeContext(
             camera=cached_camera,
@@ -121,6 +124,7 @@ def build_execution_context(config, *, camera, event_callback=None):
             anygrasp=anygrasp,
             segmenter=build_segmenter(config),
             event_callback=event_callback,
+            perception_workers=workers,
         ),
         camera,
     )

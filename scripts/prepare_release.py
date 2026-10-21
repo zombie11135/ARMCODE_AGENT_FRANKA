@@ -17,13 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {
     "agents", "app", "core", "runtime", "services", "skill_lib", "skill_lab",
     "hardware", "perception_v2", "nesyro_gate", "gate_learning", "gate_sim",
-    "anyplace_real", "tests", "scripts", "docs", ".github",
+    "anyplace_real", "robocasa_occlusion", "occlusion_reasoning",
+    "tests", "scripts", "docs", ".github",
 }
 ROOT_FILES = {
     ".gitignore", "README.md", "CONTRIBUTING.md", "THIRD_PARTY.md", "LICENSE",
     "NOTICE", "main_agent.py", "test_xarm.py", "RELEASE_MANIFEST.json",
     "run_fr3_agent.sh", "run_anygrasp_offline.sh", "run_gsnet_pick.sh",
     "view_gsnet_o3d.sh", "register_object_photos.sh",
+    "run_robocasa_scene.sh", "run_occlusion_camera_test.sh",
 }
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".txt", ".yaml", ".yml", ".json", ".dot", ".svg"}
 EXTRA_FILES = {

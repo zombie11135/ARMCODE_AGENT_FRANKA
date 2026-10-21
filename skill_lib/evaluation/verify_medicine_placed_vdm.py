@@ -115,6 +115,7 @@ class VerifyMedicinePlacedVDMSkill(BaseSkill):
         response_format: Optional[Dict[str, Any]] = None,
         min_success_confidence: float = 0.55,
         min_visible_success_confidence: float = 0.35,
+        wrist_only: bool = False,
         **kwargs,
     ) -> SkillResult:
         try:
@@ -130,20 +131,25 @@ class VerifyMedicinePlacedVDMSkill(BaseSkill):
                     "json_schema": PLACED_VDM_JSON_SCHEMA,
                 }
 
-            raw_text = client.describe_images(
-                image_paths=[
-                    before_global_color_path,
-                    before_wrist_color_path,
-                    after_global_color_path,
-                    after_wrist_color_path,
-                ],
-                image_labels=[
+            image_paths = [before_global_color_path, before_wrist_color_path,
+                           after_global_color_path, after_wrist_color_path]
+            image_labels = [
                     "before_global: scene before placement attempt.",
                     "before_wrist: wrist view before placement attempt.",
                     "after_global: scene after placement attempt, inspect container contents.",
                     "after_wrist: wrist view after placement attempt, inspect container contents.",
-                ],
-                prompt=PLACED_VDM_PROMPT.format(
+                ]
+            prompt = PLACED_VDM_PROMPT
+            if wrist_only:
+                image_paths = [before_wrist_color_path, after_wrist_color_path]
+                image_labels = [image_labels[1], image_labels[3]]
+                prompt = prompt.replace('- before_global: scene before placement attempt\n', '').replace(
+                    '- after_global: scene after placement attempt\n', '')
+                prompt += '\nOnly the wrist camera is available. No global view was captured; do not infer independent multi-view evidence.\n'
+            raw_text = client.describe_images(
+                image_paths=image_paths,
+                image_labels=image_labels,
+                prompt=prompt.format(
                     medicine_query=medicine_query,
                     container_name=container_name,
                     container_color=container_color or "unspecified",

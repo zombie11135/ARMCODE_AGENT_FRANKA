@@ -101,9 +101,9 @@ class SimpleExecutionRuntime:
                         except Exception as error:
                             print(f"[FR3] 夹爪通信异常，结束会话：{error}")
                             state = None
-                        if state is not None and state.object_detected_closing:
+                        if state is not None and hardware.gripper.may_be_holding_object():
                             from hardware.gsnet_pick import hold_console
-                            print("[FR3] 夹爪仍有接触；保持通信，使用 open 释放或 quit 退出。")
+                            print("[FR3] 夹爪有接触记录，可能仍夹持物体；保持通信，使用 open 释放或 quit 退出。")
                             hold_console(hardware.gripper, lambda event, **data: print(event, data))
                 finally:
                     hardware.disconnect()
@@ -135,7 +135,9 @@ class SimpleExecutionRuntime:
                     # A new task gets a new image; no previous-scene name binding is reused.
                     if isinstance(context.camera, TaskCachedCamera):
                         context.camera.disable_cache()
-                    image_path = context.require('camera').capture_wrist()['color_path']
+                    from runtime.observation_memory import fresh_camera
+                    with fresh_camera(context.camera, 'new_task_name_resolution'):
+                        image_path = context.require('camera').capture_wrist()['color_path']
                 result = resolver.resolve_in_image(action.target, context, image_path)
             decisions[key] = result
             records.append(dict(op=action.op, **result))
@@ -172,9 +174,9 @@ class SimpleExecutionRuntime:
                 def gripper_close():
                     grip = context.require("gripper")
                     result = grip.close()
-                    # gOBJ=3 completes the close even without detected contact.
+                    # A contact-limited close deliberately finishes with gGTO=0.
                     context.arm.motion_guard = lambda: grip.assert_healthy(require_ready=True)
-                    return result.ready and result.go_to and result.object_state in (2, 3)
+                    return grip.close_completed(result)
             else:
                 gripper_open = lambda: self._call_grip_service_repeated(
                     value=self.config.grip_open_value,
@@ -377,7 +379,10 @@ class SimpleExecutionRuntime:
         )
 
     def _capture_task_home_view(self, context, camera_service) -> None:
-        task_global = camera_service.capture_global()
+        from runtime.observation_memory import invalidate_camera
+        invalidate_camera(camera_service, 'new_task')
+        task_global = (None if getattr(camera_service, 'active_camera_names', None) == ('wrist',)
+                       else camera_service.capture_global())
         task_wrist = camera_service.capture_wrist()
         if isinstance(context.camera, TaskCachedCamera):
             context.camera.set_task_captures(
@@ -398,7 +403,9 @@ class SimpleExecutionRuntime:
         if not result.success and isinstance(camera, TaskCachedCamera):
             print("[executing] 容器预观测失败，保持实时拍摄再试一次。")
             camera.disable_cache()
-            result = robot.preobserve_containers(actions)
+            from runtime.observation_memory import fresh_camera
+            with fresh_camera(camera, 'container_preobserve_retry'):
+                result = robot.preobserve_containers(actions)
 
         if isinstance(camera, TaskCachedCamera):
             camera.disable_cache()
@@ -948,6 +955,7 @@ class SimpleExecutionRuntime:
             before_wrist_color_path=before_pair["wrist"]["color_path"],
             after_global_color_path=after["global"]["color_path"],
             after_wrist_color_path=after["wrist"]["color_path"],
+            wrist_only=bool(after.get('global_is_wrist_fallback', False)),
             base_url=self.config.vdm_base_url,
             api_key=self.config.vdm_api_key,
             model_name=self.config.vdm_model,
@@ -974,10 +982,12 @@ class SimpleExecutionRuntime:
 
     @staticmethod
     def _capture_verify_pair(camera_service) -> Dict[str, Dict[str, Any]]:
-        return {
-            "global": camera_service.capture_global(),
-            "wrist": camera_service.capture_wrist(),
-        }
+        from runtime.observation_memory import fresh_camera
+        with fresh_camera(camera_service, 'placement_verification'):
+            if getattr(camera_service, 'active_camera_names', None) == ('wrist',):
+                wrist = camera_service.capture_wrist()
+                return {'global': wrist, 'wrist': wrist, 'global_is_wrist_fallback': True}
+            return {'global': camera_service.capture_global(), 'wrist': camera_service.capture_wrist()}
 
     def _write_failure_report(
         self,

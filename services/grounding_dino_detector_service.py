@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional
 
 import cv2
+from runtime.perception_pipeline import serialized_resource
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
@@ -109,6 +110,7 @@ class GroundingDINODetectorService:
 
         print("[GroundingDINO] Model loaded successfully.")
 
+    @serialized_resource('gpu')
     def detect(
         self,
         image_path: str,

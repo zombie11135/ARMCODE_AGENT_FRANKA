@@ -190,3 +190,133 @@ SAM3 权重接入验证（2026-10-13）
       --no_replan --no_resume_from_failure --debug_output --execute_robot
   在交互提示中输入：把抗病毒颗粒药盒放到粉色盘子里
   此命令会实际移动机械臂和开合夹爪；需要已有 ROS 2/MoveIt real 栈处于可用状态。
+
+2026-10-15 Robotiq 接触后限位闭合
+  正式 Agent 已切换到 AgentContactGripper，复用独立夹爪实验的同一算法。
+  config/hardware/robotiq_contact_close.json: extra_close_raw=3，contact_rise_ma=30，
+  current_limit_ma=100，confirm_samples=2，闭合 speed_raw=0 / force_raw=0，max_close_raw=225。
+  固定读取 config/calibration/robotiq_contact_baseline.json，不再每轮手动 baseline。
+  原启动命令不变，重启 Agent 生效。不要同时运行占用串口的夹爪实验终端。
+  上层通过 close_completed() 接受新方法的主动停止，不要求停止后的 gGTO 仍为 1。
+  保留当前不强制接触确认的任务行为；电流超限或通信故障仍会阻止抬升。
+  runs/agent_gripper_contact/ 保存电流/位置 JSON，可用 test_gripper_contact.sh --plot 离线绘图。
+  参数、基线来源、各修改文件、恢复旧驱动的方法见 docs/gripper_contact.txt 末尾。
+
+2026-10-21 腕部单相机与按观测位姿复用
+  当前 config/hardware/fr3.yaml 设置 cameras.mode: wrist，只启动腕部 D435i。
+  旧 global 请求由已标定的腕部入口响应，结果明确标记 camera_name=wrist、requested_view=global；
+  没有固定相机图像或双视角融合。放置 VDM 只发送腕部前/后两图，不重复冒充两路视角。
+  calibration 同学之后完成双相机外参后，再另行接入几何融合；仅切换 dual 不会自动完成融合。
+
+  调度顺序：
+    1. 读取当前 fr3_link0 -> fr3_link8 位姿（只读 FK）。
+    2. 同一目标和识别配置已有成功观测，且满足位姿范围/有效期/场景版本时，
+       直接复用识别结果；跳过拍照、检测、OCR，以及为重复 observe 返回旧观测点的移动。
+    3. 没有成功识别缓存时，先查同一相机、同一标定的 RGB-D 位姿缓存；命中则复用原图。
+    4. 未命中才采新帧、检查采集期间机械臂静止、冻结 RGB-D 与采集时位姿，再执行识别。
+    5. 只保存成功观测；失败/异常会让旧帧失效。抓取仍按请求执行识别与抓取规划，
+       可复用有效 RGB-D，但不会直接复用上一次 AnyGrasp 规划结果。
+
+  observation_cache 参数（在硬件 YAML 中修改，重启 Agent 生效）：
+    enabled: true                     # false 则不复用 RGB-D 或观测 skill 结果
+    position_radius_m: 0.02            # 法兰位置欧氏距离 2 cm
+    orientation_radius_rad: 0.08726646259971647  # SO(3) 相对旋转角 5 度
+    max_age_s: 30                      # 从原始图像采集时刻起算，命中不续期
+    max_entries: 16                    # 图像与观测结果共享的有界 LRU 条目数
+  缓存支持多个历史观测点；离开后返回，在有效期内仍可命中。Euler 角跨 +/-pi 不会误判。
+  原始图像、深度、点云路径、采集时间、before/after 法兰位姿和手眼标定保持绑定。
+  不把旧像素配上当前 FK；缓存只在进程内使用，不把历史任务 JSON 恢复为新的有效位姿缓存。
+  检测/OCR 配置或后端实例变化后，不沿用此前的成功识别结果。
+
+  失效与强制刷新：
+    抓取、放置、清障执行开始/结束，以及失败或异常路径，使旧观测失效（全局保守失效）。
+    识别失败、抓取规划重观察、Gate probe、主动视角清障检查、清障后复查、放置前后验证
+    均重新取图；新任务也不沿用上一个任务的观测帧。
+    手工移动物体后可调用 context.camera.invalidate_observations('external_scene_change')；
+    特定操作需要始终新图时，使用：
+      from runtime.observation_memory import fresh_camera
+      with fresh_camera(context.camera, 'manual_probe'):
+          result = robot.observe('目标名称')
+    fresh_camera 作用域会绕过图片和观测结果两层缓存。
+    日志 [observation_cache] wrist image hit 表示只跳过相机采集；
+         [observation_cache] medicine(...) skill hit 表示识别也跳过。
+    context.camera.observation_memory.stats 可查看 hits/misses/invalidations。
+    原有容器基座坐标放置计划仍属于任务规划缓存；其存在不代表当前视角有新的可见性证据。
+
+  限制：这是按视点邻域复用的第一版，不是已完成三维建图的可见空间覆盖。
+  不拍新图时不能确认人是否移动过物体，也不能保证附近视角具有完全相同的遮挡关系。
+  静态桌面先使用小范围/短有效期；动态遮挡评估可设置 enabled: false 或强制刷新。
+  手工相机采集入口不查询 FK，因此不能单凭其图像声明已验证真机位姿缓存。
+
+  仅相机采集（不读取机械臂状态、不初始化机械臂/夹爪）：
+    bash run_occlusion_camera_test.sh capture --camera-mode wrist
+  对新目录进行遮挡单视角分析（自动读取 capture_report.json 中实际采集的相机）：
+    bash run_occlusion_camera_test.sh analyze --capture-dir <采集目录> --output-dir <新分析目录>
+  该采集入口没有观测缓存，每次均为新采集；旧双相机数据仍可离线分析。
+
+  离线调度验证：tests/test_observation_memory.py 使用模拟 FK、相机和识别 skill。
+  覆盖近点命中、远点/旋转拒绝、离开再返回、过期不续期、标定/识别配置变化、
+  原图与原采集位姿绑定、旧任务图片缓存旁路、失败/异常重采、三类操作的失效、
+  容器重观察以及单相机验证。测试不会执行机械臂、夹爪或模型加载。
+
+  本次验证结果：207 项相关测试通过。
+  真机只运行相机采集入口：仅启动/停止 serial=349622072103 的腕部流，640x480 RGB-D。
+  报告明确 robot_control_initialized=false、robot_state_queried=false；没有机械臂/夹爪动作。
+  记录：runs/occlusion_real/20261021_131419_750aa0/capture_report.json
+  预览：runs/occlusion_real/20261021_131419_750aa0/camera_preview.png
+  这次没有在真机运行基于实际 FK 的缓存调度；该部分目前由离线模拟测试验证。
+
+2026-10-21 并发一致性与候选感知流水线
+  本节补充上一版位姿缓存的并发约束。当前执行器仍按动作依赖顺序运行；
+  开放的是同一份保存 RGB 图像上的候选分割/OCR 流水线，不是多个抓取/放置同时执行。
+
+  稳定失效机制：
+    ObservationMemory 使用 RLock 保护缓存查找、版本变更和结果提交。
+    epoch 表示观测代次，强制重拍也会推进；scene_epoch 表示场景版本，场景失效时推进。
+    抓取、放置、清障的底层执行函数统一进入 scene_mutation：
+      获取共享设备锁 -> 推进版本并标记执行中 -> 执行 -> finally 再失效并退出执行中。
+    操作失败、异常、调用方绕过 SimpleRobotActions 直接调用这些底层执行函数，仍覆盖此路径。
+    物理操作导致失效时，通过弱引用回调同步清理 robot.observations 与 robot.place_plans；
+    保留任务进度和放置数量。仅强制重拍不会把清障正在使用的输入证据提前清掉。
+
+    感知工作可以在后台继续，但只能返回局部结果。写入 Agent 状态之前必须原子检查：
+      图像来源代次 == 当前 epoch，而且当前不在物理执行中。
+    校验与写入位于同一个锁内；写回缓存和目标/容器记录也属于同一次提交。
+    旧的成功结果返回 stale_observation，旧的失败结果也不能清空新代次观测。
+    last_wrist_capture 改为线程局部变量，防止 A 任务误用 B 任务的图片位姿。
+    采集过程中若发生外部显式失效，也会拒绝返回该帧。
+    抓取计划携带来源观测代次，执行入口再次校验；容器基座放置计划校验 scene_epoch，
+    允许在场景未变时拍摄放置前验证图，但不能跨物理场景变更继续使用旧计划。
+
+    相机 RGB-D/FK 绑定与物理执行共用设备锁；FR3 旧位姿适配器也使用该锁。
+    相机不会与这些 Agent 运动入口交叉采集。纯观察点移动不会主动使整个静态桌面失效。
+    以上为当前进程内 Agent 路径的一致性保证，不能检测其他终端的 ROS 运动或人的物体移动。
+    外部变化仍调用 invalidate_observations('external_scene_change')；重新启动任务会清除旧证据。
+
+  已接入的并行：
+    config/hardware/fr3.yaml -> perception.parallel_candidate_workers: 2（允许 1..4，1 为串行）。
+    至少两个候选且 use_sam_for_selection=True 时，分割与 OCR 按候选交叠：
+      GPU: SAM(A) -> SAM(B) -> ...
+      CPU:           OCR(A) -> OCR(B) -> ...
+    同一 GPU 资源一次允许一个 SAM3 / GroundingDINO / 参考图匹配 / FR3 抓取推理调用；
+    同一 PaddleOCR 服务也串行访问。GPU 推理与 CPU OCR 可以同时进行。
+    线程池有界，候选结果仍按输入顺序合并，保持原有目标排序语义。
+    每帧分析和每个候选有独立 UUID 输出目录，避免 mask、crop、OCR 文件相互覆盖。
+    worker 缓冲 UI 事件，由调用线程按顺序发布，不让后台线程直接调用 UI。
+    每阶段检查来源代次，过期后停止后续候选阶段；已进入模型的调用需等其返回后丢弃。
+    共享服务首次加载加锁，防止两个 OCR 请求各自初始化一份模型。
+    单候选、bbox-only OCR、参考图快速识别分支保持现有顺序；没有为凑并发强制启动 SAM。
+
+  后续优化顺序：
+    1. 同一帧一次检测/特征提取，多目标查询共享候选；合并同键的在途请求。
+    2. 把检测、OCR、深度/平面证据、遮挡图、抓取规划整理为有依赖和资源声明的任务图。
+       状态提交与运动授权由一个执行器负责，工作线程只处理不可变输入并返回局部结果。
+    3. 建立区域与对象依赖后，将全场景失效缩小到受影响区域；届时才值得在机械臂执行时
+       预计算其他区域目标。当前全局失效会丢弃旧场景的预计算，不保证这种投机计算能提速。
+    4. 记录实际采集、模型排队/推理、观察移动和执行耗时，再确定 workers 和批处理大小。
+    5. 统一 observe 失败、重试预算、Gate probe 与重新规划的状态，避免重复做低收益观测。
+
+  并发验证入口：tests/test_observation_memory.py 与 tests/test_perception_pipeline.py。
+  使用事件/屏障制造旧任务晚返回、负结果晚返回、采集跨场景变化、提交与失效竞争、
+  设备锁竞争、GPU 与 CPU 重叠、同资源互斥、模型首次加载竞争等情况。
+  本轮不连接机械臂/夹爪，不做真机动作测试；模拟并发通过不代表已测得真机推理加速比。

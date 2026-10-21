@@ -118,6 +118,7 @@ class AgentIntegrationTests(unittest.TestCase):
         empty = GripperStatus(True, True, 3, 3, 0, 255, 240, 10)
         grip.open.return_value = GripperStatus(True, True, 3, 3, 0, 0, 3, 0)
         grip.close.return_value = empty
+        grip.close_completed.side_effect = lambda state: Robotiq2F85.close_completed(grip, state)
         grip.assert_healthy.return_value = empty
         context = RuntimeContext(arm=arm, gripper=grip, transforms=self.transforms)
         cfg = SimpleAgentSystemConfig(goal='offline no-contact test', execute_robot=True,

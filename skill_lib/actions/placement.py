@@ -9,11 +9,14 @@ from typing import Any, Dict, TYPE_CHECKING
 
 from core.skill_base import SkillResult
 from skill_lib.actions.targets import container_key, parse_container_spec, placement_slot_offset_mm
+from skill_lib.actions.observation_cache import invalidate_after_manipulation
+from runtime.observation_memory import scene_mutation
 
 if TYPE_CHECKING:
     from skill_lib.simple_actions import SimpleRobotActions
 
 
+@invalidate_after_manipulation('place')
 def place(robot: SimpleRobotActions, container: str) -> SkillResult:
     spec = parse_container_spec(container)
     key = container_key(spec)
@@ -37,6 +40,7 @@ def place(robot: SimpleRobotActions, container: str) -> SkillResult:
     )
 
 
+@scene_mutation('place')
 def _execute_cached_place(robot: SimpleRobotActions, place_plan: Dict[str, Any]) -> Dict[str, Any]:
     for label, pose in [
         ("approach", place_plan["approach_pose_mmrad"]),

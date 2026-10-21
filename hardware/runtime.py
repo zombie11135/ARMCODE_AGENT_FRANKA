@@ -1,6 +1,9 @@
 """FR3/Robotiq wiring for the original agent and explicit legacy pose adapter."""
 from dataclasses import asdict, dataclass, replace
+from pathlib import Path
 import warnings
+from contextlib import nullcontext
+from runtime.observation_memory import memory_for
 
 from .config import HardwareConfig, load_config
 from .fr3 import FrankaMoveItArm
@@ -15,9 +18,10 @@ class LegacyPoseAdapter:
     Converts mm to m. Frames and tool transforms are the caller's responsibility;
     it must never be fed the unconverted camera/old xArm plans.
     """
-    def __init__(self, arm, healthcheck=None):
+    def __init__(self, arm, healthcheck=None, observation_memory=None):
         self.arm = arm
         self.healthcheck = healthcheck
+        self.observation_memory = observation_memory
         self._warned_speed = False
 
     def get_position(self, is_radian=True):
@@ -34,7 +38,9 @@ class LegacyPoseAdapter:
             self._warned_speed = True
         if self.healthcheck:
             self.healthcheck()
-        self.arm.move_pose(Pose6D(x / 1000, y / 1000, z / 1000, roll, pitch, yaw))
+        guard = self.observation_memory.device_lock if self.observation_memory is not None else nullcontext()
+        with guard:
+            self.arm.move_pose(Pose6D(x / 1000, y / 1000, z / 1000, roll, pitch, yaw))
         if self.healthcheck:
             self.healthcheck()
         return 0  # Returned only after controller + endpoint + cleanup success.
@@ -63,7 +69,8 @@ class Hardware:
         if monitor_gripper:
             self.arm.motion_guard = lambda: self.gripper.assert_healthy(require_ready=True)
         context.xarm = LegacyPoseAdapter(
-            self.arm, healthcheck=(lambda: self.gripper.assert_healthy(require_ready=True)) if monitor_gripper else None)
+            self.arm, healthcheck=(lambda: self.gripper.assert_healthy(require_ready=True)) if monitor_gripper else None,
+            observation_memory=memory_for(context.camera))
 
     def open_gripper(self):
         result = self.gripper.open()
@@ -72,7 +79,7 @@ class Hardware:
     def close_gripper(self):
         # Completion permits the Agent to continue; this is not proof of object contact.
         result = self.gripper.close()
-        return result.ready and result.go_to and result.object_state in (2, 3)
+        return self.gripper.close_completed(result)
 
     def disconnect(self):
         self.gripper.disconnect()
@@ -86,8 +93,12 @@ def build_hardware(path=None, *, execute=False, stack=None, speed_scaling=None, 
     if speed_scaling is not None:
         cfg = replace(cfg, arm=replace(cfg.arm, speed_scaling=speed_scaling))
     transforms = load_transforms(cfg)
+    gripper_type = Robotiq2F85
+    if cfg.gripper.contact_close_file:
+        from .robotiq_contact import AgentContactGripper
+        gripper_type = AgentContactGripper
     return Hardware(cfg, FrankaMoveItArm(cfg.arm, stack=stack, execution_enabled=execute),
-                    Robotiq2F85(cfg.gripper, execution_enabled=execute), transforms)
+                    gripper_type(cfg.gripper, execution_enabled=execute), transforms)
 
 
 def require_task_geometry(config):
@@ -95,6 +106,9 @@ def require_task_geometry(config):
     if getattr(config, "hardware_config_path", None):
         cfg = load_config(config.hardware_config_path)
         load_transforms(cfg).require_ready()
+        if cfg.gripper.contact_close_file:
+            from .robotiq_contact import load_contact_close_setup
+            load_contact_close_setup(cfg.gripper)  # Files only; fail before camera/model/device startup.
         if cfg.perception.grasp_backend == "anygrasp":
             from services.anygrasp_fr3_service import validate_anygrasp_paths
             validate_anygrasp_paths(cfg.perception)
@@ -109,7 +123,10 @@ def camera_service(path, capture_dir):
 
     profile = load_config(path)
     cfg = profile.cameras
-    params = {**asdict(cfg), "capture_dir": str(capture_dir), "profile": str(path)}
+    params = {**asdict(cfg), "capture_dir": str(capture_dir), "profile": str(path),
+              "observation_cache": asdict(profile.observation_cache),
+              "arm_profile": asdict(profile.arm), "perception": asdict(profile.perception),
+              "calibration": Path(profile.calibration_file).read_text() if profile.calibration_file else None}
 
     def create():
         def camera(name, serial, depth):
@@ -121,7 +138,8 @@ def camera_service(path, capture_dir):
         camera_device = RealSenseDualCameraService(
             global_config=camera("global", cfg.global_serial, False),
             wrist_config=camera("wrist", cfg.wrist_serial, True),
-            save_dir=capture_dir, show_window=cfg.show_window)
+            save_dir=capture_dir, show_window=cfg.show_window,
+            active_cameras=('wrist',) if cfg.mode == 'wrist' else ('global', 'wrist'))
         return CalibratedCamera(camera_device, profile)
 
     return get_or_create_service("fr3_dual_realsense", params, create), params

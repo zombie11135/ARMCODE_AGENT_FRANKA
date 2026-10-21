@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import threading
 from dataclasses import dataclass
@@ -42,12 +43,21 @@ class RealSenseDualCameraService:
         save_dir: str = "runs/current_capture",
         show_window: bool = True,
         save_depth_vis: bool = True,
+        startup_timeout_s: float = 10.0,
+        active_cameras=("global", "wrist"),
     ):
         self.global_config = global_config
         self.wrist_config = wrist_config
+        self.active_camera_names = tuple(active_cameras)
+        if (not self.active_camera_names or len(set(self.active_camera_names)) != len(self.active_camera_names)
+                or not set(self.active_camera_names) <= {'global', 'wrist'}):
+            raise ValueError('active_cameras must contain distinct global/wrist names')
         self.save_dir = save_dir
         self.show_window = show_window
         self.save_depth_vis = save_depth_vis
+        if not math.isfinite(startup_timeout_s) or startup_timeout_s <= 0:
+            raise ValueError("startup_timeout_s must be finite and positive")
+        self.startup_timeout_s = float(startup_timeout_s)
 
         os.makedirs(self.save_dir, exist_ok=True)
 
@@ -69,6 +79,7 @@ class RealSenseDualCameraService:
 
         self._threads = []
         self._running = False
+        self._last_frame_errors = {}
 
     @staticmethod
     def _empty_frame_dict():
@@ -102,39 +113,64 @@ class RealSenseDualCameraService:
 
     def start(self):
         if self._running:
-            print("[CameraService] Dual RealSense cameras already running.")
+            print(f"[CameraService] RealSense cameras already running: {self.active_camera_names}")
             return
 
+        if any(t.is_alive() for t in self._threads):
+            raise RuntimeError("Previous camera workers have not stopped; cannot restart")
+        self._threads = []
         self._stop_event.clear()
-        self._start_camera("global", self.global_config)
-        self._start_camera("wrist", self.wrist_config)
+        self._last_frame_errors.clear()
+        for name in self._frames:
+            with self._locks[name]:
+                self._frames[name] = self._empty_frame_dict()
+        try:
+            for name in self.active_camera_names:
+                self._start_camera(name, getattr(self, name + '_config'))
+            for camera_name in self.active_camera_names:
+                t = threading.Thread(
+                    target=self._camera_worker, args=(camera_name,), daemon=True,
+                )
+                t.start()
+                self._threads.append(t)
 
-        for camera_name in ["global", "wrist"]:
-            t = threading.Thread(
-                target=self._camera_worker,
-                args=(camera_name,),
-                daemon=True,
-            )
-            t.start()
-            self._threads.append(t)
+            self._wait_for_first_frames()
+            if self.show_window:
+                display_thread = threading.Thread(target=self._display_worker, daemon=True)
+                display_thread.start()
+                self._threads.append(display_thread)
+            self._running = True
+            print(f"[CameraService] RealSense cameras started: {self.active_camera_names}; first frames ready.")
+        except BaseException:
+            self.stop()
+            raise
 
-        if self.show_window:
-            display_thread = threading.Thread(
-                target=self._display_worker,
-                daemon=True,
-            )
-            display_thread.start()
-            self._threads.append(display_thread)
-
-        print("[CameraService] Dual RealSense cameras started.")
-        self._running = True
+    def _wait_for_first_frames(self):
+        """Opening streams does not mean their asynchronous frame buffers are ready."""
+        deadline = time.monotonic() + self.startup_timeout_s
+        configs = {name: getattr(self, name + '_config') for name in self.active_camera_names}
+        while not self._stop_event.is_set():
+            pending = []
+            for name, cfg in configs.items():
+                with self._locks[name]:
+                    frame = self._frames[name]
+                    ready = frame["color"] is not None and (
+                        not cfg.enable_depth or frame["depth"] is not None)
+                if not ready:
+                    pending.append(f"{name}(serial={cfg.serial}, "
+                                   f"streams={'RGB-D' if cfg.enable_depth else 'RGB'}, "
+                                   f"last_error={self._last_frame_errors.get(name, 'none')})")
+            if not pending:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"Timed out after {self.startup_timeout_s:g}s waiting for "
+                                   f"first camera frames: {', '.join(pending)}")
+            self._stop_event.wait(min(0.02, remaining))
+        raise RuntimeError("Camera startup interrupted before first frames were ready")
 
     def stop(self):
-        if not self._running:
-            return
-
         self._stop_event.set()
-        time.sleep(0.2)
 
         for name, pipeline in self._pipelines.items():
             try:
@@ -143,14 +179,20 @@ class RealSenseDualCameraService:
             except Exception as e:
                 print(f"[CameraService] Failed to stop {name}: {e}")
 
-        if self.show_window:
+        for thread in self._threads:
+            if thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+        if self.show_window and self._threads:
             cv2.destroyAllWindows()
 
         self._running = False
-        self._threads = []
+        self._threads = [t for t in self._threads if t.is_alive()]
         self._pipelines = {}
         self._aligners = {}
         self._profiles = {}
+        for name in self._frames:
+            with self._locks[name]:
+                self._frames[name] = self._empty_frame_dict()
 
     def capture_global(self) -> Dict[str, Any]:
         """
@@ -173,6 +215,8 @@ class RealSenseDualCameraService:
         return self.capture("wrist")
 
     def capture(self, camera_name: str) -> Dict[str, Any]:
+        if camera_name not in self.active_camera_names:
+            raise ValueError(f'Camera {camera_name} is disabled')
         if camera_name not in ["global", "wrist"]:
             raise ValueError(f"Unknown camera_name: {camera_name}")
 
@@ -346,11 +390,17 @@ class RealSenseDualCameraService:
         try:
             profile = pipeline.start(config)
         except Exception as e:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
             raise RuntimeError(
                 f"Failed to start {camera_name} camera, "
                 f"serial={cam_cfg.serial}, error={e}"
             )
 
+        # Own the started stream before metadata validation, so failures release it.
+        self._pipelines[camera_name] = pipeline
         device = profile.get_device()
         active_name = device.get_info(rs.camera_info.name)
         active_serial = device.get_info(rs.camera_info.serial_number)
@@ -487,6 +537,7 @@ class RealSenseDualCameraService:
                     last_print_time = now
 
             except RuntimeError as e:
+                self._last_frame_errors[camera_name] = str(e)
                 error_count += 1
                 now = time.time()
                 if now - last_print_time > 3.0:
@@ -497,6 +548,7 @@ class RealSenseDualCameraService:
                     last_print_time = now
 
             except Exception as e:
+                self._last_frame_errors[camera_name] = str(e)
                 print(f"[CameraService] Error in {camera_name} worker: {e}")
                 time.sleep(0.1)
 

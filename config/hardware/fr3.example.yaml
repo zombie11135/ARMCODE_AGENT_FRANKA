@@ -14,14 +14,24 @@ gripper:
   speed_raw: 32
   force_raw: 0
   feedback_log_dir: null
+  # Optional Agent contact-close profile with a baseline measured on THIS device.
+  contact_close_file: null
 cameras:
+  mode: wrist  # dual enables the fixed/global stream as well.
   global_serial: SET_GLOBAL_CAMERA_SERIAL
   wrist_serial: SET_WRIST_CAMERA_SERIAL
   width: 640
   height: 480
   fps: 6
   show_window: false
+observation_cache:
+  enabled: true
+  position_radius_m: 0.02
+  orientation_radius_rad: 0.08726646259971647
+  max_age_s: 30
+  max_entries: 16
 perception:
+  parallel_candidate_workers: 2
   grasp_backend: anygrasp
   gsnet_root: /absolute/path/to/gsnet
   sam3_model_dir: /absolute/path/to/models/sam3

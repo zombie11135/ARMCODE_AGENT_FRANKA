@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from core.actions import SimpleAction
 from core.skill_base import SkillResult
 from services.object_names import display_name
+from skill_lib.actions.observation_cache import invalidate_after_manipulation, require_fresh_observation
+from runtime.observation_memory import fresh_camera
 
 if TYPE_CHECKING:
     from skill_lib.simple_actions import SimpleRobotActions
@@ -84,7 +86,8 @@ def _run_occlusion_recovery(robot: SimpleRobotActions, target: str) -> SkillResu
         if cfg.occlusion_active_view_wait_s > 0:
             time.sleep(float(cfg.occlusion_active_view_wait_s))
 
-        observe_result = robot._observe_medicine_once(target)
+        with fresh_camera(getattr(robot.context, 'camera', None), 'occlusion_active_view_probe'):
+            observe_result = robot._observe_medicine_once(target)
         if not observe_result.success:
             robot.observations[target] = {
                 "kind": "medicine",
@@ -149,6 +152,7 @@ def _run_occlusion_recovery(robot: SimpleRobotActions, target: str) -> SkillResu
     return last_result
 
 
+@invalidate_after_manipulation('clear_occlusion')
 def _invoke_clear_occlusion_skill(robot: SimpleRobotActions, target: str) -> SkillResult:
     from skill_lib.manipulation.clear_occlusion_to_buffer import (
         ClearOcclusionToBufferSkill,
@@ -227,6 +231,7 @@ def _recovery_attempt_record(view: Any, result: SkillResult) -> Dict[str, Any]:
     }
 
 
+@require_fresh_observation('after_occlusion_recovery')
 def _refresh_after_occlusion_recovery(robot: SimpleRobotActions, target: str) -> SkillResult:
     robot.observations.pop(target, None)
     result = robot.observe(target)

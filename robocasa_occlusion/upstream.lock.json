@@ -1,0 +1,11 @@
+{
+  "verified_date": "2026-10-17",
+  "robocasa_commit": "a9e152e2eea16d342dac40e4577fb4c68b932854",
+  "robosuite_commit": "5ce6643f3092639d08f7b0f90ed1c6a84f50552c",
+  "asset_archive_sha256": {
+    "textures": "ba3a4dcef96e199cbd601c7cdb7eb46077fb6672611b7ac74c25a191bf0be392",
+    "fixtures": "62c1c87776edda9b7c42dda7b00781a1e5a7f90acc3e49d06c39c9545cbd6c3e",
+    "lightwheel": "a1db739b0e80fc4d56d4be27d89dba3aa60000e9648c5607874700e0f14b7955",
+    "generative_textures": "bc05095af306222d9a799a9b0b5b16662aa546998622ee8fd3072566ea4c31ec"
+  }
+}

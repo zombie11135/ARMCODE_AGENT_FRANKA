@@ -6,6 +6,7 @@ import sys
 import uuid
 
 import numpy as np
+from runtime.perception_pipeline import serialized_resource
 
 from hardware.agent_geometry import capture_pose
 from hardware.config import load_config, PROJECT_ROOT
@@ -47,6 +48,7 @@ class GSNetService:
         subprocess.run([sys.executable, str(PROJECT_ROOT / 'hardware/gsnet_worker.py'), str(request_path)],
                        check=True, timeout=180, stdout=log, stderr=subprocess.STDOUT)
 
+    @serialized_resource('gpu')
     def plan_grasp(self, *, color_path, intrinsics, capture_geometry=None,
                    points_path=None, mask_path=None, mask_npy_path=None, bbox=None,
                    bbox_filter_margin_px=0, bbox_filter_inner_margin_ratio=0,

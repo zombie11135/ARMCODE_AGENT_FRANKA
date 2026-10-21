@@ -16,6 +16,7 @@ class RuntimeContext:
         gripper=None,
         transforms=None,
         object_references=None,
+        perception_workers=1,
     ):
         self.camera = camera
         self.vlm = vlm
@@ -30,6 +31,7 @@ class RuntimeContext:
         self.gripper = gripper
         self.transforms = transforms
         self.object_references = object_references
+        self.perception_workers = perception_workers
 
     def require(self, name: str):
         value = getattr(self, name, None)

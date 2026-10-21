@@ -22,6 +22,7 @@ import uuid
 import numpy as np
 from PIL import Image
 import yaml
+from runtime.perception_pipeline import serialized_resource
 
 from .object_names import legacy_object_id, normalize_name
 
@@ -332,6 +333,7 @@ class ObjectReferenceService:
         self._frame_features.clear()
         return "disk" if hit else "built"
 
+    @serialized_resource('gpu')
     def match(self, *, image_path, candidates, query, exclude_groups=()):
         started = time.perf_counter()
         obj = self.resolve(query)

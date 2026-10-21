@@ -433,6 +433,15 @@ class Robotiq2F85:
     def close(self, **kwargs):
         return self.move_raw(self.config.close_raw, **kwargs)
 
+    def close_completed(self, state):
+        """Command completion, separate from proof of object contact/retention."""
+        return bool(state.ready and state.go_to and state.object_state in (2, 3))
+
+    def may_be_holding_object(self):
+        """Cleanup hint only; never a force measurement or a motion permission."""
+        state = self._last_status
+        return bool(state is not None and state.object_detected_closing)
+
     def stop(self):
         self._require_execution()
         # Allowed concurrently with a blocking command; it does not wait for the

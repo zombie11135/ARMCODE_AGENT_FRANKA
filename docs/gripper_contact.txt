@@ -1,0 +1,142 @@
+Robotiq 2F-85 独立接触后限位实验
+================================
+
+范围
+  只使用现有 USB/RS-485 夹爪，不加载相机、机械臂、ROS、MoveIt、AnyGrasp。
+  独立实验终端里的 set/baseline 命令不修改 Agent 配置；Agent 的固定配置见本文末尾。
+  本实验独立使用最低速度 speed_raw=0、最低力度 force_raw=0。
+  这些是协议值，不是零速度/零牛顿。
+
+启动（先退出占用夹爪串口的 Agent/其它终端）
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+  bash test_gripper_contact.sh --execute --current-limit-ma 100 \
+    --contact-rise-ma 30 --extra-close-raw 0
+
+  100 mA / 30 mA 是供首轮观察的实验值，不是已验证的防损坏阈值。
+  先用 extra-close-raw=0 查看接触即停的结果，再尝试 1 格。
+  启动只读状态并进入命令行；不会自动激活、开合或驱动机械臂。
+  未加 --execute 时为只读会话，所有动作会被拒绝。
+
+首次实验（每行是在 contact> 提示符中输入的独立命令）
+  status
+  activate                 # 仅当 status 显示未激活时需要；会自标定运动
+  open                     # 手指会打开，会释放已有物体
+  baseline                 # 确保夹爪之间无物体，闭合到 raw=225 采集空载基线
+  open
+  [此时人工将物体置于夹爪之间；夹爪不会自动运动]
+  grasp
+
+  baseline 不自动打开；需要从 open 开始。它会实际闭合。
+  结束后保持当前位置，不自动松开，不自动再次夹紧。
+  正在运动时 Ctrl+C 请求停止并返回终端；等待输入时 Ctrl+C 退出。
+  若停止未确认，结束会话而不继续动作。通信失联时无法保证软件停止送达。
+  open 释放物体；quit 退出且不打开。退出后停止通信保活。
+
+逐次调参，不依赖物体名称/类别
+  set extra-close-raw 1
+  open
+  [人工放置物体]
+  grasp
+
+  set contact-rise-ma 20    # 较敏感；可能受摩擦/噪声影响误判
+  set contact-rise-ma 40    # 较不敏感；可能更晚检测接触
+  set current-limit-ma 100  # 绝对电流上限，达到则停止且不再追加
+  set confirm-samples 2    # 持续超基线采样数；增加会引入检测延迟
+  settings
+  plot
+  quit
+
+  speed-raw / force-raw / max-close-raw 改动会清除基线，需要重新 open -> baseline。
+  修改 current-limit-ma 不会改变内部 rFR，也不会修改硬件配置文件。
+  该阈值不能高于硬件配置中已设置的 close_current_limit_ma。
+  机械安装、指尖或摩擦状态变化时，也应重新采集基线。
+
+算法与实际限制
+  - 空载基线按位置每 8 格分桶取中位数，桶间线性插值；边界用最近桶。
+  - 需要匹配设备、速度、力度、总行程和相近起始开度。
+  - 前 0.10 s 不使用相对电流判接触，避免启动尖峰；绝对电流上限全程有效。
+  - 连续 N 次超过空载基线 + contact-rise-ma，记为疑似接触。
+  - 追加位移起点取这一串超阈值样本中的第一点，包含确认期间已经走过的距离。
+  - 已经走完额度就立即停止；未走完则仅更新一次目标位置，然后停。
+  - 硬电流上限、通信/状态问题优先停止；原生接触状态出现后不强行追加闭合。
+  - 若启动期间已经接触，可能只有原生状态/绝对上限能检测到，不保证接触时刻精度。
+  - 协议位置增大表示闭合。1 raw 约为名义 0.4 mm 分辨率，不是本机精确毫米标定。
+  - RS-485、主机调度与电机响应有延迟。位移额度不是无超调保证，日志记录实测超调。
+  - 软件间隔默认 10 ms，后台保活 50 ms。实际间隔取决于通信，不能视为保证 100 Hz。
+  - 超过 200 ms 无状态/有效命令回显则停止；记录实际最大采样间隔。
+  - 不把电流换算成牛顿，不把接触或停止判为抓稳；grasp_verified 始终 false。
+  - total travel 默认 raw=225，避免默认追到机械全闭合端。更小物体可能在此行程内碰不到。
+
+结果
+  runs/gripper_contact/<时间>-<ID>.json     完整时间戳、状态、电流、动作和停止原因
+  runs/gripper_contact/<时间>-<ID>.csv      逐采样表
+  runs/gripper_contact/<时间>-<ID>.png      电流/基线/阈值与位置曲线
+  runs/gripper_contact/<时间>-<ID>.baseline.json  成功空载采集生成的基线
+
+  PNG/CSV 在确认停止后生成；Matplotlib 使用 Agg，不弹窗，也不操作硬件。
+  未确认停止时不绘图；JSON 仍保存诊断信息。进程被强制 kill/断电可能只留 in_progress 文件。
+  contact.source=current_rise_suspected: 电流推断，可能误判。
+  contact.source=native: 夹爪自身报告闭合接触。
+  closure_after_contact_raw: 从首次判定接触样本到停止确认时已闭合多少格。
+  overshoot_raw: 相对追加位移目标超出的格数，若无追加目标则不适用。
+  current_limit: 达到绝对电流上限，不当作接触成功。
+  travel_limit_no_contact: 到达总行程限制，未观察到接触。
+
+仅重新绘图（完全离线，不读取硬件配置，不连接串口）
+  bash test_gripper_contact.sh --plot '/绝对路径/实验.json'
+
+显式复用基线（保持同一安装、同一速度/力度/行程）
+  bash test_gripper_contact.sh --execute --current-limit-ma 100 \
+    --extra-close-raw 0 --baseline '/绝对路径/实验.baseline.json'
+
+建议首轮提供给分析的数据
+  空载 baseline JSON、一次 grasp JSON/PNG，以及“是否碰到 / 是否变形 / 是否夹住”的观察。
+  不要仅据电流峰值认定接触力；停止后的零电流不代表夹持力为零。
+
+2026-10-15 接入正式 Agent
+  正式 FR3 Agent 的 gripper.close() 已使用同一个 ContactPolicy / run_trial。
+  在 config/hardware/fr3.yaml 中通过以下字段启用：
+    gripper.contact_close_file: robotiq_contact_close.json
+
+  参数位置：config/hardware/robotiq_contact_close.json
+    extra_close_raw: 3      # 最大追加 3 个位置协议格，不是 3 mm
+    contact_rise_ma: 30
+    current_limit_ma: 100
+    confirm_samples: 2
+    speed_raw: 0
+    force_raw: 0
+    max_close_raw: 225
+  上述参数延续已有实验，追加位移按用户要求从 2 改为 3。
+  停止仍可能超调，报告中的 closure_after_contact_raw / overshoot_raw 记录实际结果。
+  打开动作仍用原硬件 YAML 中的 speed_raw / force_raw，不改闭合基线的条件。
+
+  已固定复制最近成功的空载基线：
+    来源 runs/gripper_contact/20261015-153245-cdc18b48.baseline.json
+    使用 config/calibration/robotiq_contact_baseline.json
+  Agent 只读取固定副本，不自动寻找最新实验、不自动空载闭合采集。
+  启动前校验设备/速度/力度/行程等条件，缺失或不匹配时报错，不回退旧全闭合。
+  更换指尖/安装或改闭合运动条件后，应重新实验并显式更新 baseline_file 指向的文件。
+
+  原有 Agent 启动命令可继续使用，需退出旧进程再启动以加载新驱动和参数。
+  完整任务还是：视觉/抓取位姿 -> MoveIt 接近 -> 接触限位闭合 -> 抬升/搬运 -> 放开。
+  不改物体检测、SAM3、AnyGrasp、手眼变换、TCP、MoveIt 或技能规划。
+  当前用户设置仍允许“走到闭合行程终点但没检测到接触”后继续；不新增接触必需门槛。
+  电流上限/通信异常/超时/未确认停止仍是错误，阻止本次抬升，不自动补夹或重试。
+
+  新驱动保持真实 gGTO=0，不伪造接触。Agent 用 close_completed() 判断命令完成。
+  may_be_holding_object() 仅用于任务结束时保留手动释放终端，不能证明抓稳。
+  抓取日志 runs/agent_gripper_contact/<时间>-<ID>.json；不在闭合过程中生成图，避免延迟。
+  需要图时可离线执行：
+    bash test_gripper_contact.sh --plot '/绝对路径/agent_gripper_contact/实验.json'
+
+  代码范围：
+    hardware/robotiq_contact.py       加载基线/参数并适配 close()，保持普通开爪接口
+    hardware/gripper_contact.py       复用此前已测试策略，本次未改判定算法
+    hardware/robotiq.py               增加统一的完成/可能夹持状态接口，原始 close 不改
+    hardware/config.py / runtime.py  配置路径解析、驱动选择和离线预检
+    agents/simple_execution_runtime.py  完成回调与退出时的持物提示，技能流程不改
+  原始 hardware.cli gripper 和独立 GSNet 诊断脚本继续使用原始协议驱动；正式 Agent 走新驱动。
+  将 gripper.contact_close_file 设为 null 可显式恢复正式 Agent 的原始闭合驱动。
+
+  离线验证：151 项通过，包含模拟 Modbus 与 Agent 闭合后抬升调用链；未访问设备。
+  本次修改前备份：/home/seur/data/wpy/backups/contact_close_agent_20261015_153945

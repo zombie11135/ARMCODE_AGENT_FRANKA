@@ -651,9 +651,8 @@ def interactive_loop(args, executor_args):
     print("\nArmCode Agent CLI")
     print("输入 /help 查看命令；输入 /quit 退出。")
     print("当前执行模式:", "robot" if args.execute_robot else "dry-run")
-    warmup_camera_if_needed(args)
-
     try:
+        warmup_camera_if_needed(args)
         while True:
             try:
                 if prompt_toolkit_prompt is not None and not args.disable_prompt_toolkit:
@@ -1081,7 +1080,13 @@ def main():
     if not args.goal:
         raise SystemExit(interactive_loop(args, executor_args))
 
-    ok = run_goal(args, goal=args.goal, executor_args=executor_args)
+    try:
+        ok = run_goal(args, goal=args.goal, executor_args=executor_args)
+    finally:
+        if args.close_services_on_exit:
+            from services.runtime_service_cache import close_cached_services
+
+            close_cached_services()
     if not ok:
         raise SystemExit(1)
 

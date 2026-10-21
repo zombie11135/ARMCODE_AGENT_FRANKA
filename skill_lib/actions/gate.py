@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from core.actions import SimpleAction
 from core.skill_base import SkillResult
+from skill_lib.actions.observation_cache import require_fresh_observation
 
 if TYPE_CHECKING:
     from skill_lib.simple_actions import SimpleRobotActions
@@ -401,6 +402,7 @@ def _build_gate_input(
     )
 
 
+@require_fresh_observation('gate_probe')
 def _run_gate_probe(
     robot: SimpleRobotActions,
     action: SimpleAction,

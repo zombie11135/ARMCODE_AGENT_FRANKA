@@ -6,6 +6,7 @@ import numpy as np
 from .gsnet_single import build_targets, pose_difference
 from .interfaces import Pose6D
 from .transforms import pose_matrix
+from runtime.observation_memory import scene_mutation
 
 
 def capture_pose(capture, transforms):
@@ -138,6 +139,7 @@ def grasp_plan(grasp_input, result, transforms, workcell, *, target_rx=math.pi, 
             'grasp_input': grasp_input, 'choose_reason': reason}
 
 
+@scene_mutation('grasp')
 def execute_grasp(context, plan, gripper_open, gripper_close):
     """Approach -> grasp -> completed close -> lift; contact is telemetry only."""
     arm, gripper = context.require('arm'), context.require('gripper')

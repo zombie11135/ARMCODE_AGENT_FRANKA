@@ -5,6 +5,7 @@ from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+from runtime.perception_pipeline import serialized_resource
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -84,6 +85,7 @@ class SAM3BBoxSegmenterService:
 
         print("[SAM3BBox] SAM3 model loaded successfully.")
 
+    @serialized_resource('gpu')
     def segment_by_bbox(
         self,
         image_path: str,

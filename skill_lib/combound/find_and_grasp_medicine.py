@@ -2,12 +2,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 import math
 import time
+import copy
+import uuid
 
 import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.observation_memory import fresh_skill_camera, memory_for, StaleObservationError
+from runtime.perception_pipeline import ordered_bounded_map
 from skill_lib.combound.select_obj_by_text import SelectObjectByTextSkill
 from skill_lib.evaluation.verify_medicine_ocr import VerifyMedicineOCRSkill
 from skill_lib.manipulation.plan_grasp_with_anygrasp import PlanGraspWithAnyGraspSkill
@@ -290,6 +294,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 pass
             return SkillResult(success=False, data={}, error=error)
 
+    @fresh_skill_camera('grasp_planning_retry')
     def _reobserve_target_and_retry_grasp(
         self,
         query: str,
@@ -486,7 +491,12 @@ class FindAndGraspMedicineSkill(BaseSkill):
         detections = detections[:max_instances]
         self.context.emit_text(f"多提示词融合后得到 {len(detections)} 个候选 bbox。")
 
-        if use_sam_for_selection:
+        workers = getattr(self.context, 'perception_workers', 1)
+        pipelined = use_sam_for_selection and workers > 1 and len(detections) > 1
+        if pipelined:
+            instances = self._candidate_pipeline(image_path, detections, query,
+                                                  expand_bbox_px, ocr_padding_px, workers, **kwargs)
+        elif use_sam_for_selection:
             instances = self._segment_candidates(
                 image_path=image_path,
                 detections=detections,
@@ -507,12 +517,9 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 error="没有可用于 OCR/抓取的候选药盒。",
             )
 
-        instances = self._augment_ocr(
-            image_path=image_path,
-            instances=instances,
-            query=query,
-            padding=ocr_padding_px,
-        )
+        if not pipelined:
+            instances = self._augment_ocr(
+                image_path=image_path, instances=instances, query=query, padding=ocr_padding_px)
 
         select_result = self._select_best_instance(
             instances=instances,
@@ -662,19 +669,62 @@ class FindAndGraspMedicineSkill(BaseSkill):
         new_det["fused_confidence"] = float(det.get("confidence", 0.0) or 0.0)
         fused.append(new_det)
 
+    def _candidate_pipeline(self, image_path, detections, query, expand_bbox_px, padding, workers, **kwargs):
+        root = Path('runs/current_capture/perception') / uuid.uuid4().hex
+        started = time.perf_counter()
+        memory = memory_for(self.context.camera)
+        source = getattr(self.context.camera, 'last_wrist_capture', None) if memory is not None else None
+        epoch = (source.get('observation_cache', {}).get('epoch')
+                 if isinstance(source, dict) and source.get('color_path') == image_path else None)
+
+        def require_current():
+            if memory is not None and epoch is not None and not memory.commit(epoch, lambda: None):
+                raise StaleObservationError('Scene changed; discard pending candidate inference')
+
+        def process(indexed):
+            require_current()
+            index, detection = indexed
+            # Share backend instances, but buffer UI events and keep output
+            # files and intermediate dictionaries local to this candidate.
+            context = copy.copy(self.context)
+            events = []
+            context.event_callback = events.append
+            finder = type(self)(context)
+            folder = root / f'candidate_{index:02d}'
+            instances = finder._segment_candidates(image_path, [copy.deepcopy(detection)],
+                        expand_bbox_px, output_root=folder, **kwargs)
+            instances = [inst for inst in instances if inst.get('success')]
+            if instances:
+                require_current()
+                instances = finder._augment_ocr(image_path, instances, query, padding, output_root=folder)
+            require_current()
+            return instances, events
+
+        instances = []
+        for candidate_instances, events in ordered_bounded_map(process, enumerate(detections), workers):
+            instances.extend(candidate_instances)
+            for event in events:
+                self.context.emit(event)
+        self.context.emit_text(f'[perception_pipeline] {len(detections)} candidates, workers={workers}, '
+                               f'elapsed={time.perf_counter()-started:.3f}s; GPU=1, OCR=1')
+        return instances
+
     def _segment_candidates(
         self,
         image_path: str,
         detections: List[Dict[str, Any]],
         expand_bbox_px: int,
+        output_root=None,
         **kwargs,
     ) -> List[Dict[str, Any]]:
         segment_skill = SegmentObjectSkill(self.context)
         instances = []
+        root = Path(output_root) if output_root is not None else Path('runs/current_capture/perception') / uuid.uuid4().hex
+        root.mkdir(parents=True, exist_ok=True)
 
         for idx, det in enumerate(detections):
             obj_id = det.get("object_id", f"obj_{idx + 1}")
-            prefix = f"runs/current_capture/advanced_medicine_{idx + 1:02d}_{obj_id}"
+            prefix = str(root / f'segment_{idx + 1:02d}')
             seg_result = segment_skill.run(
                 image_path=image_path,
                 bbox=det["bbox"],
@@ -738,8 +788,11 @@ class FindAndGraspMedicineSkill(BaseSkill):
         instances: List[Dict[str, Any]],
         query: str,
         padding: int,
+        output_root=None,
     ) -> List[Dict[str, Any]]:
         ocr = self.context.require("ocr")
+        root = Path(output_root) if output_root is not None else Path('runs/current_capture/perception') / uuid.uuid4().hex
+        root.mkdir(parents=True, exist_ok=True)
 
         for idx, inst in enumerate(instances):
             texts = []
@@ -757,7 +810,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 try:
                     result = ocr.read_image(
                         image_path=source_path,
-                        output_prefix=f"runs/current_capture/advanced_ocr_{idx + 1:02d}_{source_name}",
+                        output_prefix=str(root / f'ocr_{idx + 1:02d}_{source_name}'),
                         min_confidence=0.0,
                     )
                     texts.extend(result.get("texts", []))
@@ -777,7 +830,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                     result = ocr.read_region(
                         image_path=image_path,
                         bbox=inst["bbox"],
-                        output_prefix=f"runs/current_capture/advanced_ocr_{idx + 1:02d}_region",
+                        output_prefix=str(root / f'ocr_{idx + 1:02d}_region'),
                         padding=padding,
                         min_confidence=0.0,
                     )
@@ -941,6 +994,10 @@ class FindAndGraspMedicineSkill(BaseSkill):
 
         return {
             "capture_geometry": capture.get("capture_geometry"),
+            "observation_provenance": capture.get("observation_cache"),
+            "capture_timestamp": capture.get("timestamp"),
+            "camera_name": capture.get("camera_name"),
+            "device_serial": capture.get("device_serial"),
             "points_path": capture.get("points_path"),
             "object_id": selected.get("object_id"),
             "target_name": selected.get("target_name", "medicine_box"),

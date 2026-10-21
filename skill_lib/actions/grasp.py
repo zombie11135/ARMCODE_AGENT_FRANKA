@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING
 
 from core.skill_base import SkillResult
 from skill_lib.config import FALLBACK_INTRINSICS
+from skill_lib.actions.observation_cache import invalidate_after_manipulation
 
 if TYPE_CHECKING:
     from skill_lib.simple_actions import SimpleRobotActions
 
 
+@invalidate_after_manipulation('grasp')
 def grasp(robot: SimpleRobotActions, obj: str) -> SkillResult:
     from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
 

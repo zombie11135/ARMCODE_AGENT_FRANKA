@@ -1,14 +1,18 @@
 """Stationary, immutable RGB-D observations bound to the calibrated FR3 flange."""
 from pathlib import Path
+from dataclasses import asdict
 import json
+import hashlib
 import time
 import uuid
+import threading
 
 import numpy as np
 
 from .fr3 import FrankaMoveItArm
 from .gsnet_single import pose_difference
 from .transforms import load_transforms
+from runtime.observation_memory import ObservationMemory, stationary_camera, StaleObservationError
 
 
 class CalibratedCamera:
@@ -17,17 +21,69 @@ class CalibratedCamera:
         self.config = config
         self.arm = arm or FrankaMoveItArm(config.arm, execution_enabled=False)
         self.transforms = load_transforms(config)
+        self.observation_memory = ObservationMemory(config.observation_cache, clock=lambda: time.time())
+        self._capture_local = threading.local()
+        self.last_wrist_capture = None
+
+    @property
+    def last_wrist_capture(self):
+        return getattr(self._capture_local, 'last', None)
+
+    @last_wrist_capture.setter
+    def last_wrist_capture(self, value):
+        self._capture_local.last = value
+
+    @property
+    def observation_scope(self):
+        payload = json.dumps({'camera': asdict(self.config.cameras),
+                              'calibration': self.transforms.summary(),
+                              'perception': asdict(self.config.perception)}, sort_keys=True)
+        return hashlib.sha256(payload.encode()).hexdigest()
+
+    @property
+    def active_camera_names(self):
+        return ('wrist',) if self.config.cameras.mode == 'wrist' else ('global', 'wrist')
+
+    @property
+    def perception_workers(self):
+        return self.config.perception.parallel_candidate_workers
+
+    @stationary_camera
+    def observation_pose(self):
+        return self.arm.get_pose().values
+
+    def invalidate_observations(self, reason='external_scene_change'):
+        self.observation_memory.invalidate(reason, discard_scene=True)
+        self.last_wrist_capture = None
 
     def __getattr__(self, name):
         return getattr(self.camera, name)
 
+    @stationary_camera
     def capture_global(self):
+        if self.config.cameras.mode == 'wrist':
+            capture = self.capture_wrist()
+            capture['requested_view'] = 'global'
+            capture['view_fallback'] = 'wrist_only_mode'
+            return capture
         return self._freeze(self.camera.capture_global())
 
+    @stationary_camera
     def capture_wrist(self):
         if self.config.arm.stack != 'real':
             raise RuntimeError('Live images require real capture-time FK, not fake joint states')
         before = self.arm.get_pose()
+        memory = self.observation_memory
+        scope = self.observation_scope
+        cached = memory.get(('capture', 'wrist'), before.values, scope)
+        if cached is not None:
+            if not memory.commit(cached['observation_cache']['epoch'], lambda: None):
+                raise StaleObservationError('Scene changed during cached capture lookup')
+            cached['observation_cache']['hit'] = True
+            self.last_wrist_capture = cached
+            print('[observation_cache] wrist image hit; original acquisition geometry retained')
+            return cached
+        epoch = memory.epoch
         before_time = time.time()
         first = self.camera.capture_wrist()
         frame_number = first['color_frame_number']
@@ -57,7 +113,16 @@ class CalibratedCamera:
             'stationarity': difference, 'serial': serial, 'optical_frame': optical,
             'calibration': self.transforms.summary(),
         }
-        return self._freeze(capture)
+        capture['camera_name'] = 'wrist'
+        capture['observation_cache'] = {'hit': False, 'epoch': epoch,
+                                      'scene_epoch': memory.scene_epoch,
+                                      'acquired_at': capture['timestamp'], 'scope': scope}
+        frozen = self._freeze(capture)
+        if not memory.commit(epoch, lambda: memory.put(
+                ('capture', 'wrist'), frozen, before.values, capture['timestamp'], scope, epoch)):
+            raise StaleObservationError('Scene changed while acquiring RGB-D; capture again')
+        self.last_wrist_capture = frozen
+        return frozen
 
     def capture(self, camera_name):
         if camera_name == 'wrist':

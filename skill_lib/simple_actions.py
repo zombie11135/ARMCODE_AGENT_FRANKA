@@ -62,6 +62,10 @@ class SimpleRobotActions:
         self.place_plans: Dict[str, Dict[str, Any]] = {}
         self.place_counts: Dict[str, int] = {}
         self.observations: Dict[str, Dict[str, Any]] = {}
+        from runtime.observation_memory import memory_for
+        memory = memory_for(getattr(context, 'camera', None))
+        if memory is not None:
+            memory.on_invalidate(self._discard_scene_evidence)
         self.gate_probe_counts: Dict[str, int] = {}
         self.occlusion_recovery_counts: Dict[str, int] = {}
         # Phase-1 unified gate cache (feature reuse: one facade per config key).
@@ -69,6 +73,12 @@ class SimpleRobotActions:
         self._unified_gate_key: Optional[Tuple[str, str, float, int]] = None
         self._gate_logger = None
         self._last_gate_decision_id: Optional[str] = None
+
+    def _discard_scene_evidence(self, reason):
+        # These are derived from images too, not just ObservationMemory entries.
+        # Keep placement counts/task progress; discard obsolete geometric plans.
+        self.observations.clear()
+        self.place_plans.clear()
 
     def run(self, actions: Iterable[SimpleAction]) -> SkillResult:
         actions = list(actions)

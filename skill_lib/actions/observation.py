@@ -12,6 +12,8 @@ from core.actions import SimpleAction
 from core.skill_base import SkillResult
 from skill_lib.config import FALLBACK_INTRINSICS
 from skill_lib.actions.targets import container_key, parse_container_spec
+from runtime.observation_memory import memory_for
+from skill_lib.actions.observation_cache import reuse_observation, recall_observation
 
 if TYPE_CHECKING:
     from skill_lib.simple_actions import SimpleRobotActions
@@ -59,10 +61,11 @@ def preobserve_containers(robot: SimpleRobotActions, actions: Iterable[SimpleAct
     return SkillResult(success=True, data={"preobserved_containers": results})
 
 
+@reuse_observation('container')
 def observe_container(robot: SimpleRobotActions, container: str) -> SkillResult:
     spec = parse_container_spec(container)
     key = container_key(spec)
-    if key in robot.place_plans:
+    if key in robot.place_plans and memory_for(robot.context.camera) is None:
         return SkillResult(success=True, data=robot.place_plans[key], message="container plan already cached")
 
     from skill_lib.combound.place_to_container import PlaceToContainerSkill
@@ -91,15 +94,6 @@ def observe_container(robot: SimpleRobotActions, container: str) -> SkillResult:
         gripper_open=None,
         fallback_intrinsics=None if robot.context.transforms is not None else FALLBACK_INTRINSICS,
     )
-    if result.success:
-        robot.place_plans[key] = result.data
-        robot.place_counts.setdefault(key, 0)
-        robot.observations[container] = {
-            "kind": "container",
-            "target": container,
-            "container_key": key,
-            "place_plan": result.data,
-        }
     return result
 
 
@@ -113,13 +107,22 @@ def observe(robot: SimpleRobotActions, obj: str) -> SkillResult:
 
 
 def _observe_container_action(robot: SimpleRobotActions, container: str) -> SkillResult:
+    hit = recall_observation(robot, 'container', container)
+    if hit is not None:
+        return hit
     cached = robot.observations.get(container)
     if cached and cached.get("place_plan"):
-        return robot._move_to_cached_container_observe_pose(container, cached["place_plan"])
+        result = robot._move_to_cached_container_observe_pose(container, cached["place_plan"])
+        if result.success and memory_for(robot.context.camera) is not None:
+            return robot.observe_container(container)
+        return result
     return robot._scan_until_found(container, robot.observe_container)
 
 
 def _observe_medicine_action(robot: SimpleRobotActions, obj: str) -> SkillResult:
+    hit = recall_observation(robot, 'medicine', obj)
+    if hit is not None:
+        return hit
     cached = robot.observations.get(obj)
     if cached and cached.get("selected_instance") and cached.get("grasp_input"):
         move_result = robot._move_to_cached_medicine_observe_pose(obj, cached)
@@ -129,6 +132,7 @@ def _observe_medicine_action(robot: SimpleRobotActions, obj: str) -> SkillResult
     return robot._scan_until_found(obj, robot._observe_medicine_once)
 
 
+@reuse_observation('medicine')
 def _observe_medicine_once(robot: SimpleRobotActions, obj: str) -> SkillResult:
     from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
 
@@ -150,14 +154,6 @@ def _observe_medicine_once(robot: SimpleRobotActions, obj: str) -> SkillResult:
         xarm_ip=cfg.xarm_ip,
         handeye_config_path=cfg.handeye_config_path,
     )
-    if result.success:
-        robot.observations[obj] = {
-            "kind": "medicine",
-            "target": obj,
-            "selected_instance": result.data.get("selected_instance"),
-            "grasp_input": result.data.get("grasp_input"),
-            "result": result.data,
-        }
     return result
 
 

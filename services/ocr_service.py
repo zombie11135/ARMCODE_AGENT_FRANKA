@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
+from runtime.perception_pipeline import serialized_resource
 import numpy as np
 
 
@@ -81,6 +82,7 @@ class PaddleOCRService:
 
         print("[OCR] PaddleOCR loaded.")
 
+    @serialized_resource('ocr_cpu')
     def read_image(
         self,
         image_path: str,
@@ -120,6 +122,7 @@ class PaddleOCRService:
             "vis_path": vis_path,
         }
 
+    @serialized_resource('ocr_cpu')
     def read_region(
         self,
         image_path: str,
