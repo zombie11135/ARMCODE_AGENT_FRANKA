@@ -1,6 +1,7 @@
-# Run from the project root with env_armcode_agent. Preserve the installed
-# Torch/CUDA/NumPy stack: python -m pip install --no-deps -r this-file
-# Prepare the MobileCLIP checkout and checkpoint first; see THIRD_PARTY.md.
--e ./dependencies/yoloe/third_party/ml-mobileclip
-open_clip_torch==2.32.0
-ftfy==6.1.1
+# MobileCLIP2-B: install in the perception runtime that also runs GroundingDINO.
+# Preserve the robot's Torch/CUDA stack; use an isolated environment when testing.
+# Weights: models/mobileclip2-b/mobileclip2_b.pt (local, never auto-downloaded).
+open_clip_torch==3.3.0
+timm==1.0.30
+# First-generation MobileCLIP remains an explicit legacy option; its optional
+# mobileclip package is not needed by the MobileCLIP2 observation path.

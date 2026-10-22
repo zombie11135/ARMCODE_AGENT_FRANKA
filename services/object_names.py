@@ -106,7 +106,7 @@ class ObjectNameResolver:
                     spans.append((start, end, self.lookup(token)))
         return [r for _, _, r in sorted(spans, key=lambda item: item[0])]
 
-    def resolve_in_image(self, query, context, image_path):
+    def resolve_in_image(self, query, context, image_path, **recognition_options):
         started = time.perf_counter()
         resolution = self.lookup(query)
         if resolution['status'] != 'needs_scene':
@@ -116,7 +116,8 @@ class ObjectNameResolver:
         matches, attempts = [], []
         incomplete = False
         for obj in resolution['candidates']:
-            result = RecognizeObjectSkill(context).run(image_path=image_path, query=obj['object_id'], segment=False)
+            result = RecognizeObjectSkill(context).run(image_path=image_path, query=obj['object_id'],
+                                                      **dict(recognition_options, segment=False))
             attempts.append(dict(object_id=obj['object_id'], success=result.success, data=result.data, error=result.error))
             if result.success:
                 matches.append(obj)
