@@ -20,8 +20,16 @@ def grasp(robot: SimpleRobotActions, obj: str) -> SkillResult:
     from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
 
     cfg = robot.config
+    prepared = None
+    if cfg.enable_geometry_occlusion:
+        from .geometry_occlusion import prepare_grasp
+        ready = prepare_grasp(robot, obj)
+        if not ready.success:
+            return ready
+        prepared = robot.observations[obj]['result']
     result = FindAndGraspMedicineSkill(robot.context).run(
         query=str(obj),
+        **({'prepared_observation': prepared} if prepared is not None else {}),
         camera_name="wrist",
         min_score=cfg.grasp_min_score,
         detection_threshold=cfg.grasp_box_threshold,
@@ -52,7 +60,7 @@ def grasp(robot: SimpleRobotActions, obj: str) -> SkillResult:
         verify_ocr=cfg.verify_ocr,
         ocr_verify_strict_mode=cfg.ocr_verify_strict_mode,
         ocr_verify_fuzzy_threshold=cfg.ocr_verify_fuzzy_threshold,
-        reobserve_on_grasp_failure=cfg.reobserve_on_grasp_failure,
+        reobserve_on_grasp_failure=cfg.reobserve_on_grasp_failure and not cfg.enable_geometry_occlusion,
         reobserve_only_when_execute=not cfg.execute,
         reobserve_z_mm=cfg.reobserve_z_mm,
         reobserve_wait_s=cfg.reobserve_wait_s,

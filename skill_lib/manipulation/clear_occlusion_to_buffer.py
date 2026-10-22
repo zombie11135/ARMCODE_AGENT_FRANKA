@@ -39,6 +39,7 @@ class ClearOcclusionToBufferSkill(BaseSkill):
         gripper_close: Optional[Callable[[], bool]] = None,
         gripper_close_wait_s: float = 1.5,
         blocker_bbox: Optional[List[float]] = None,
+        blocker_evidence: Optional[Dict[str, Any]] = None,
         blocker_bbox_shrink_ratio: float = 0.08,
         blocker_search_expand_ratio: float = 1.8,
         blocker_min_area_ratio: float = 0.50,
@@ -70,7 +71,7 @@ class ClearOcclusionToBufferSkill(BaseSkill):
         del kwargs
         try:
             resolved_buffer_pose = list(
-                buffer_pose_mmrad
+                (blocker_evidence or {}).get('buffer_pose_mmrad') or buffer_pose_mmrad
                 or [280.0, -260.0, 170.0, 3.14, 0.0, -1.57]
             )
             if len(resolved_buffer_pose) != 6 or not all(
@@ -100,7 +101,7 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                 or result_data.get("vlm_occlusion")
             )
             blocker_description = _vlm_blocker_description(vlm_occlusion)
-            detected = self._detect_blocker_candidates(
+            detected = [] if blocker_evidence is not None else self._detect_blocker_candidates(
                 image_path=image_path,
                 prompts=blocker_detector_prompts,
                 blocker_description=blocker_description,
@@ -120,22 +121,26 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                     "清障恢复缺少可读取的同帧 wrist 深度图，禁止规划抓取。",
                     recommendation="move_camera_farther_and_reobserve",
                 )
-            blocker = _select_blocker_candidate(
-                observation=observation,
-                candidates=candidates,
-                depth=depth,
-                manual_bbox=blocker_bbox,
-                search_expand_ratio=blocker_search_expand_ratio,
-                min_area_ratio=blocker_min_area_ratio,
-                depth_closer_margin_m=blocker_depth_closer_margin_m,
-                allow_unlocalized_target=allow_unlocalized_target,
-                image_size=_image_size(image_path),
-                max_image_area_ratio=blocker_max_image_area_ratio,
-                max_target_area_ratio=blocker_max_target_area_ratio,
-                vlm_occlusion=vlm_occlusion,
-                unlocalized_vlm_min_confidence=unlocalized_vlm_min_confidence,
-                unlocalized_detector_min_confidence=unlocalized_detector_min_confidence,
-            )
+            graph_mask = None
+            if blocker_evidence is not None:
+                blocker, graph_mask = _graph_blocker(self.context, observation, blocker_evidence, depth)
+            else:
+                blocker = _select_blocker_candidate(
+                    observation=observation,
+                    candidates=candidates,
+                    depth=depth,
+                    manual_bbox=blocker_bbox,
+                    search_expand_ratio=blocker_search_expand_ratio,
+                    min_area_ratio=blocker_min_area_ratio,
+                    depth_closer_margin_m=blocker_depth_closer_margin_m,
+                    allow_unlocalized_target=allow_unlocalized_target,
+                    image_size=_image_size(image_path),
+                    max_image_area_ratio=blocker_max_image_area_ratio,
+                    max_target_area_ratio=blocker_max_target_area_ratio,
+                    vlm_occlusion=vlm_occlusion,
+                    unlocalized_vlm_min_confidence=unlocalized_vlm_min_confidence,
+                    unlocalized_detector_min_confidence=unlocalized_detector_min_confidence,
+                )
             selection_vis_path = _write_selection_visualization(
                 image_path=image_path,
                 output_dir=capture_dir,
@@ -188,12 +193,20 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                     recommendation="move_camera_farther_and_reobserve",
                 )
 
-            foreground = _build_foreground_depth_mask(
+            if graph_mask is not None:
+                height, width = graph_mask.shape
+                x0, y0, x1, y1 = _clip_bbox(planned_bbox, width, height)
+                graph_support = int(graph_mask[y0:y1, x0:x1].sum())
+            foreground = (dict(mask_npy_path=blocker['visible_mask_path'], mask_path=None,
+                               support_ratio=float(graph_support/max(1, (x1-x0)*(y1-y0))),
+                               component_area_px=int(graph_mask.sum()),
+                               policy='exact_graph_visible_mask_no_depth_band_or_morphological_completion')
+                          if graph_mask is not None else _build_foreground_depth_mask(
                 depth=depth,
                 bbox=planned_bbox,
                 output_dir=capture_dir,
                 depth_band_m=foreground_depth_band_m,
-            )
+            ))
             if (
                 foreground is None
                 or float(foreground.get("support_ratio") or 0.0)
@@ -407,6 +420,49 @@ def _failure(failure_type: str, error: str, **data) -> SkillResult:
         data={"failure_type": failure_type, **data},
         error=error,
     )
+
+
+def _graph_blocker(context, observation, evidence, depth):
+    import json
+    import numpy as np
+    from services.wrist_occlusion_service import sha, verify_binding, choose_blocker
+    from runtime.observation_memory import memory_for
+    if sha(evidence['report_path']) != evidence['report_sha256']:
+        raise ValueError('Graph report changed since blocker selection')
+    report = json.loads(Path(evidence['report_path']).read_text())
+    current = observation.get('result', {}).get('geometry_occlusion')
+    if (not current or current['report_path'] != evidence['report_path']
+            or current['report_sha256'] != evidence['report_sha256']):
+        raise ValueError('Blocker evidence belongs to another observation')
+    if current['source_binding'] != report['source_binding']:
+        raise ValueError('Graph source binding changed')
+    verify_binding(report['source_binding'])
+    expected = choose_blocker(report, allow_search=bool(evidence.get('exploratory')),
+                              max_image_fraction=evidence['max_image_fraction'],
+                              min_depth_fraction=evidence['min_depth_fraction'])
+    node = expected.get('blocker')
+    if (node is None or node['node_id'] != evidence['node_id']
+            or expected.get('target_node_id') != evidence.get('target_node_id')):
+        raise ValueError('Selected blocker is not an eligible exposed ancestor/search candidate')
+    memory = memory_for(context.camera)
+    provenance = report.get('observation_provenance') or {}
+    if memory is not None and not memory.commit(provenance.get('epoch'), lambda: None):
+        raise ValueError('Scene changed after blocker analysis')
+    if sha(node['visible_mask_path']) != node['visible_mask_sha256']:
+        raise ValueError('Blocker visible mask changed')
+    mask = np.load(node['visible_mask_path'], allow_pickle=False).astype(bool)
+    if mask.shape != depth.shape or not mask.any():
+        raise ValueError('Blocker mask must match the observed depth')
+    if np.count_nonzero(mask & np.isfinite(depth) & (depth > 0))/mask.sum() < .8:
+        raise ValueError('Insufficient measured depth on the blocker visible surface')
+    grasp_input = observation.get('grasp_input') or {}
+    for key in ('color_path', 'depth_path', 'depth_npy_path', 'points_path'):
+        binding = report['source_binding'].get(key)
+        if binding and str(Path(grasp_input.get(key, '')).resolve()) != binding['path']:
+            raise ValueError('Blocker grasp input is not from the analyzed RGB-D capture')
+    return dict(node, object_id=node['node_id'], bbox=node['bbox_xyxy'],
+                source='wrist_relation_graph', confidence=node['detection_score'],
+                selection_mode='exploratory' if evidence.get('exploratory') else 'target_graph_ancestor'), mask
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:

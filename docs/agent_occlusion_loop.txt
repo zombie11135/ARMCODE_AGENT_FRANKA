@@ -1,0 +1,134 @@
+Agent 腕部遮挡图与抓放闭环接入
+日期：2026-10-22
+
+本次完成代码集成、无硬件闭环回归以及保存的真机 RGB-D 回放。
+尚未执行“真机搬走遮挡物→实际揭示目标→抓取→放置”的物理闭环验收。
+此前 run_occlusion_camera_test.sh primary-aux 仍是独立只读实验入口，不会驱动机械臂。
+
+一、接入位置
+
+app/cli.py → runtime/config.py → agents/simple_execution_runtime.py
+  → SimpleRobotActions.observe / gate_before_action / grasp / place
+
+runtime/services.py：装配 context.occlusion，SAM3 延迟加载并在同进程复用。
+services/wrist_occlusion_service.py：将运行时的同帧 RGB-D 转为不可变观测包；
+  复用多尺度形状提示、冲突掩码筛选、边界深度及平面延伸算法。
+skill_lib/actions/geometry_occlusion.py：绑定当前目标、选取遮挡链根节点、
+  有界清障、返回观测位姿和重新观察。
+skill_lib/manipulation/clear_occlusion_to_buffer.py：接收关系图选中的精确可见掩码，
+  跳过旧的遮挡物重新检测。沿用当前 AnyGrasp/GSNet 服务、FR3 坐标转换与运动检查。
+find_and_grasp_medicine.py：最终目标抓取复用已通过图检查的同帧识别结果与可见掩码，
+  不在执行前悄悄换图或重新选择另一个物体；原有不启用关系图的路径保持兼容。
+
+二、执行逻辑
+
+observe(target)：
+  采集腕部不可变 RGB-D 和拍照时法兰位姿；若启用固定辅助，单独采集其 RGB-D。
+  现有参考图库/OCR 等识别流程确定目标身份；几何关系算法本身不读取药盒文字。
+  每台相机独立提取可见实例与关系。固定结果只做辅助记录，不合并身份或确认腕部遮挡。
+  目标识别框/掩码与腕部图节点关联；IoU≥0.35 且与次优候选差≥0.10 才接受。
+  有图但没识别目标时，记录 target_identified=false；不是目标识别成功或抓取许可。
+
+grasp(target) 的先决循环：
+  1. 检查当前观测 epoch、来源文件、时间及相机位姿附近的缓存有效性。
+  2. 仅沿“最终通向当前目标”的 possible_occludes 有向边寻找祖先。
+     A→B→target 时优先选择没有上游遮挡的 A，不根据旧图连续执行 B。
+     关系环、身份关联歧义、截断、掩码冲突或深度不足时停止。
+  3. 使用 A 的原始可见掩码与同帧 RGB-D、SDK 点云、拍照时 FK 规划抓取。
+     关系图文件、RGB、深度、点云与掩码都有来源检查；不重检遮挡物，不拼接隐藏掩码。
+  4. 搬运 A 到一个预先配置的独立空闲缓冲槽位。
+     清障尝试一旦预留槽位，本任务内不会自动复用；失败也不假定该槽位仍空闲。
+  5. 物理动作开始/结束及异常边界沿用 ObservationMemory.mutation 的 epoch 失效机制；
+     目标图、目标识别、抓取输入、容器图像与放置计划均失效。
+  6. 返回本次拍照时的法兰位姿，强制重新拍照、重新识别并重建关系图。
+  7. 若仍有遮挡，受本任务目标清障次数和剩余缓冲槽位限制，继续下一轮。
+     若已无相关遮挡证据且目标质量足够，则进入现有抓取规划与执行。
+
+place(container)：
+  抓取后旧容器计划同样失效，在 Gate 判断前重新观察并定位指定容器。
+  执行器的 current_holding 是任务进度，不随图像缓存一起删除；Gate 可据此保持
+  “已执行抓取、准备放置”的状态，但不会恢复旧目标图像或制造视觉置信度。
+  夹爪动作完成与物理接触/抓牢仍沿用已有执行语义；本次没有新增抓牢识别器。
+  放置后可按原有配置运行 VDM 效果验证。
+
+三、启动参数
+
+启用腕部主、固定辅助及清障恢复：
+  --enable_geometry_occlusion
+  --enable_occlusion_recovery
+
+SAM3 权重默认从硬件 YAML 的 perception.sam3_model_dir/sam3.pt 读取，也可显式提供：
+  --geometry_occlusion_checkpoint /你的模型目录/sam3.pt
+
+不打开固定相机：
+  --disable_geometry_occlusion_auxiliary
+
+固定辅助会在本次服务构建中启用双 RGB-D，不改写硬件 YAML，也不要求固定相机外参。
+固定视角还是实际安装视角；程序不会把斜视物理相机变成俯瞰相机。
+
+每一个缓冲槽位需要单独指定，可重复参数提供多个：
+  --geometry_occlusion_buffer_pose_mmrad X Y Z RX RY RZ
+单位是毫米/弧度，位置是 fr3_link0 中的 fr3_link8 法兰释放位姿，不是物体中心或 TCP。
+必须由操作者提供当前空闲、可达且能稳定释放遮挡物的位置；不会沿用旧 xArm 默认坐标。
+槽位占用记录作用于当前任务，不是跨进程/跨任务的持久占用地图。
+新的任务开始前，需重新确认配置的缓冲位置是否空闲。
+
+最多清障次数，例如：
+  --occlusion_recovery_max_attempts 2
+应提供足够的不同空闲槽位。达到次数或槽位上限后停止，不自动重规划来重置预算。
+
+先输入你确认的一个空闲缓冲法兰位姿，再进行不执行动作的规划检查：
+
+  read -r -p '缓冲法兰 X Y Z RX RY RZ（毫米、弧度）：' -a OCCLUSION_BUFFER
+  bash run_fr3_agent.sh \
+    --enable_geometry_occlusion \
+    --enable_occlusion_recovery \
+    --geometry_occlusion_buffer_pose_mmrad "${OCCLUSION_BUFFER[@]}" \
+    --occlusion_recovery_max_attempts 1 \
+    --goal '将目标物体的完整名称放到指定容器名称中'
+
+把任务字符串替换为当前图库/识别器支持的唯一目标名与可识别的容器描述。
+例如容器描述可为“蓝色盘子”；不要把示例文字当成已经注册的物体。
+未加 --execute_robot 不执行技能中的运动或夹爪操作，但仍会加载服务、调用相机并读取 FK。
+遇到遮挡时，dry-run 只规划首个遮挡物搬运，输出 geometry_occlusion_dry_run_clear_plan
+并停止，不能模拟清障后目标已经暴露。无遮挡时可继续规划抓放。
+
+准备好真实目标、容器、空闲缓冲位姿后，在上述命令上加入 --execute_robot 才执行动作。
+当前实现仍调用已有抓取、碰撞/IK、夹爪与 FR3 控制检查，不会绕过它们。
+
+四、目标没识别到时
+
+默认不根据“没有识别到目标”就搬走任意物体。
+如需要有界探索，可显式加入原有参数 --occlusion_allow_unlocalized_target。
+此时只在腕部图存在可用关系根节点时选择探索性搬运，exploratory=true；
+它不是“目标一定藏在该物体后面”的判断。清障后必须重新识别目标，不能直接抓未知物。
+已识别但无法与图节点唯一关联的情况，即使允许探索也停止，以免误搬目标本身。
+两侧均完全不可见、且没有任何可用关系/搜索证据时，本版仍返回未知，不伪造隐藏节点。
+
+五、日志与失败行为
+
+capture_dir/occlusion_graph/<唯一ID>/：不可变 RGB-D、分割、可见掩码、evidence.png、report.json。
+固定辅助有独立 ID 和报告，通过本次目标观测记录关联，不做跨视角几何融合。
+gate_trace.jsonl 同目录中的 occlusion_graph_trace.jsonl：
+  decision → clear_result → reobserve → decision 的逐步证据和 epoch。
+failure_report.json：保留 geometry_decision、清障/刷新错误及 automatic_replan=false。
+失败、关系歧义、缓冲不足或预算耗尽时不自动重规划继续搬运；先处理实际失败原因。
+
+六、验证范围
+
+tests/test_geometry_occlusion_agent.py 使用合成 RGB-D、模型替身与执行替身，验证：
+  主执行运行时与门面均可跑通 observe→清障→新观测→grasp→重新定位容器→place；
+  启用和停用原 NeSyRo Gate 两种模式；多层关系根节点选择、关系环、辅助视角隔离；
+  无缓冲/清障失败/身份未知/dry-run/槽位占用/旧 epoch/图像改写/晚到结果拒绝；
+  配置从 CLI 传至技能、模型延迟复用、双 RGB-D 配置不改写本机 YAML。
+这些测试不连接机械臂、夹爪或相机。
+最终核心回归：404 项通过、2 项跳过；源码导出边界与凭据模式检查通过（387 个文件）。
+
+真机保存数据回放：runs/agent_occlusion_integration/20261022_165335/replay_report.json。
+重新运行真实 SAM3 后，左下层盒选择上层 N4，右下层盒选择上层 N2，
+右上层长盒无相关遮挡证据，不清除另一组药盒。
+此回放使用人工 bbox 指定测试对象，验证接入和目标关联，不代表自动身份识别准确率。
+回放不调用相机/FK/机器人，也没有真实搬运后的新画面，不能当作物理闭环成功记录。
+
+几何关系仍包含凸形/平面延伸先验，是潜在遮挡证据，不是经过标定的遮挡概率，
+也不是夹爪接近路径被挡的证明。后续真机验收应独立记录遮挡、身份、搬运、抓取与放置结果。

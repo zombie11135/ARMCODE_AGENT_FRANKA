@@ -2,6 +2,10 @@
 机械臂 Agent：从任务规划、感知和 Gate 判断，到技能执行、失败反馈与重规划。
 当前主要接入 FR3 / Robotiq，保留显式选择的旧 xArm / ROS 1 链路。
 
+腕部遮挡关系图已接入简短技能链路，可通过 `--enable_geometry_occlusion` 启用
+“清障 → 重新观测 → 抓取目标 → 放入容器”的有界循环。
+启用参数、缓冲槽位配置和已验证范围见 [Agent 遮挡闭环说明](docs/agent_occlusion_loop.txt)。
+
 ## 分支与观测开发
 
 `feat/occlusion-observation-scheduling` 是共享开发分支，`main` 保留稳定版本。

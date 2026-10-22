@@ -191,6 +191,8 @@ class SimpleExecutionRuntime:
             config=SimpleRobotConfig(
                 **pose_options,
                 use_sam_for_grasp=getattr(self.config, "use_sam_for_grasp", False),
+                enable_geometry_occlusion=getattr(self.config, 'enable_geometry_occlusion', False),
+                geometry_occlusion_buffer_poses_mmrad=getattr(self.config, 'geometry_occlusion_buffer_poses_mmrad', []),
                 execute=self.config.execute_robot,
                 xarm_ip=self.config.xarm_ip,
                 handeye_config_path=self.config.handeye_config,
@@ -1022,6 +1024,8 @@ class SimpleExecutionRuntime:
             "error": str(error or ""),
             "evidence": evidence,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "automatic_replan": evidence.get('automatic_replan',
+                                              not getattr(self.config, 'enable_geometry_occlusion', False)),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

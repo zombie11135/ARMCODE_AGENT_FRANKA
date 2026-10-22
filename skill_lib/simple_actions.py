@@ -68,6 +68,8 @@ class SimpleRobotActions:
             memory.on_invalidate(self._discard_scene_evidence)
         self.gate_probe_counts: Dict[str, int] = {}
         self.occlusion_recovery_counts: Dict[str, int] = {}
+        self.geometry_buffer_slots_used = 0
+        self.geometry_occlusion_events = []
         # Phase-1 unified gate cache (feature reuse: one facade per config key).
         self._unified_gate = None
         self._unified_gate_key: Optional[Tuple[str, str, float, int]] = None

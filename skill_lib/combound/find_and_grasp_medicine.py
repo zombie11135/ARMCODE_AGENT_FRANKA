@@ -109,16 +109,30 @@ class FindAndGraspMedicineSkill(BaseSkill):
         reobserve_z_mm: float = 400.0,
         reobserve_wait_s: float = 0.8,
         reobserve_depth_window_px: int = 25,
+        prepared_capture: Optional[Dict[str, Any]] = None,
+        prepared_observation: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SkillResult:
         try:
             self.context.emit_text(f"开始高级药盒识别抓取：query={query}")
 
-            capture = self._capture(camera_name)
+            prepared_node = None
+            if prepared_observation is not None:
+                from skill_lib.actions.geometry_occlusion import validate_prepared
+                prepared_node = validate_prepared(self.context, prepared_observation, query)
+                capture = copy.deepcopy(prepared_observation['geometry_capture'])
+                reobserve_on_grasp_failure = False
+                fallback_to_roi_points_when_bbox_empty = False
+            else:
+                if prepared_capture is not None and (execute or plan_grasp):
+                    raise ValueError('prepared_capture alone is only allowed for recognition, not grasp planning')
+                capture = prepared_capture if prepared_capture is not None else self._capture(camera_name)
             image_path = capture["color_path"]
             self.context.emit_image(image_path=image_path, caption="高级药盒识别输入图像")
 
-            recognition = self._recognize_image(
+            recognition = (SkillResult(True, data=copy.deepcopy({k: v for k, v in prepared_observation.items()
+                           if k not in ('geometry_capture', 'geometry_occlusion', 'geometry_auxiliary')}))
+                           if prepared_observation is not None else self._recognize_image(
                 image_path=image_path, query=query,
                 target_prompts=target_prompts, aliases=aliases,
                 min_score=min_score, max_detections_per_prompt=max_detections_per_prompt,
@@ -127,7 +141,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 expand_bbox_px=expand_bbox_px, ocr_padding_px=ocr_padding_px,
                 use_sam_for_selection=use_sam_for_selection, use_mask_for_grasp=use_mask_for_grasp,
                 verify_ocr=verify_ocr, ocr_verify_strict_mode=ocr_verify_strict_mode,
-                ocr_verify_fuzzy_threshold=ocr_verify_fuzzy_threshold, **kwargs)
+                ocr_verify_fuzzy_threshold=ocr_verify_fuzzy_threshold, **kwargs))
             if not recognition.success:
                 return recognition
             selected = recognition.data["selected_instance"]
@@ -140,6 +154,9 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 use_mask_for_grasp=use_mask_for_grasp,
                 fallback_intrinsics=fallback_intrinsics,
             )
+            if prepared_node is not None:
+                grasp_input.update(mask_npy_path=prepared_node['visible_mask_path'],
+                                   mask_path=None, bbox=prepared_node['bbox_xyxy'])
 
             result_data = dict(recognition.data, grasp_input=grasp_input)
 

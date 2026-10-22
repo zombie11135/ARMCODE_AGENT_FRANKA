@@ -13,7 +13,7 @@ def _key(robot, kind, target):
     # deliberately not restored from task JSON written by an earlier process.
     return ('skill', kind, str(target), repr(vars(robot.config)),
             tuple(id(getattr(context, name, None)) for name in
-                  ('detector', 'segmenter', 'ocr', 'object_references')))
+                  ('detector', 'segmenter', 'ocr', 'object_references', 'occlusion')))
 
 
 def _observation(kind, target, data):

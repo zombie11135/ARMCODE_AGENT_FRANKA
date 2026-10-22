@@ -83,7 +83,11 @@ class SimpleArmCodeAgentSystem:
                     replan_attempts=replan_attempts,
                 )
 
-            if not self.config.enable_replan or replan_attempts >= self.config.max_replan_attempts:
+            failure_path = Path(self.config.failure_report_path)
+            automatic_replan = True
+            if failure_path.exists():
+                automatic_replan = json.loads(failure_path.read_text()).get('automatic_replan', True)
+            if not automatic_replan or not self.config.enable_replan or replan_attempts >= self.config.max_replan_attempts:
                 return AgentSystemResult(
                     success=False,
                     plan_json=self.config.plan_json,

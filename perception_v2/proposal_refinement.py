@@ -91,6 +91,43 @@ def deduplicate(proposals, threshold):
     return retained, audit
 
 
+def select_visible_hypotheses(proposals, containment_threshold=.8):
+    """Select compatible visible-mask hypotheses; retain an audit of alternatives.
+
+    A small mask mostly contained in a larger prediction cannot simultaneously
+    describe a distinct visible surface at those same pixels. Prefer the higher
+    model score, without unioning masks, modifying depth, or claiming identity.
+    The discarded alternative can be a real missed object if perception is wrong.
+    """
+    if not np.isfinite(containment_threshold) or not .5 < containment_threshold <= 1:
+        raise ValueError("containment_threshold must be in (.5, 1]")
+    selected, alternatives = [], []
+    for row in sorted(proposals, key=lambda p: (-p["confidence"], p["source_id"])):
+        mask = np.asarray(row["mask"], bool)
+        competitor = None
+        for other in selected:
+            other_mask = np.asarray(other["mask"], bool)
+            if mask.shape != other_mask.shape:
+                raise ValueError("visible masks must have the same image shape")
+            fraction = np.count_nonzero(mask & other_mask) / max(1, min(mask.sum(), other_mask.sum()))
+            if fraction >= containment_threshold:
+                competitor = {"source_id": row["source_id"], "competes_with": other["source_id"],
+                              "intersection_over_smaller_mask": float(fraction),
+                              "reason": "incompatible_overlapping_visible_mask_hypotheses"}
+                break
+        if competitor is None:
+            selected.append(row)
+        else:
+            alternatives.append(competitor)
+    return selected, {
+        "policy": "higher_score_visible_mask_selection_not_object_identity_proof",
+        "containment_threshold": containment_threshold, "input_proposals": len(proposals),
+        "selected_proposals": len(selected), "alternatives": alternatives,
+        "masks_modified": False, "scores_boosted": False,
+        "risk": "a_suppressed_alternative_may_represent_a_real_object_if_segmentation_is_wrong",
+    }
+
+
 def refine_proposals(image, prompts, backend, config=None):
     config = config or RefinementConfig()
     height, width = image.shape[:2]

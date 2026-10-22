@@ -120,3 +120,5 @@ class SimpleRobotConfig:
         default_factory=lambda: [0.0, -120.0, 120.0]
     )
     occlusion_active_view_wait_s: float = 0.8
+    enable_geometry_occlusion: bool = False
+    geometry_occlusion_buffer_poses_mmrad: List[List[float]] = field(default_factory=list)
