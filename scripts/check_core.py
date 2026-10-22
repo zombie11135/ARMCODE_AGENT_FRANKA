@@ -25,6 +25,7 @@ TESTS = (
     "test_observation_memory.py",
     "test_perception_pipeline.py",
     "test_reference_recognition.py",
+    "test_observe_gallery.py",
     "test_reference_capture.py",
     "test_wrist_raw_capture.py",
     "test_occlusion_camera_only.py",

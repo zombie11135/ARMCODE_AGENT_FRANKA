@@ -25,7 +25,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
     input_schema = {
         "query": "药品名称或包装文字，例如 布洛芬 / 西瓜霜 / 蒙脱石散。",
         "camera_name": "默认 wrist。",
-        "target_prompts": "可选。GroundingDINO 多提示词列表。",
+        "target_prompts": "可选。图库分支将描述合并为一次检测；旧 OCR 分支仍逐提示词调用。",
         "min_score": "目标文本/视觉融合最低分数。",
         "use_sam_for_selection": "是否用 SAM 生成候选 mask/crop，默认 False。",
         "use_mask_for_grasp": "是否把 SAM mask 传给 AnyGrasp，默认 False，推荐 bbox ROI。",
@@ -267,7 +267,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 "高级药盒识别完成："
                 f"object_id={selected.get('object_id')}, "
                 f"score={result_data['selection_result'].get('score'):.3f}, "
-                f"text={selected.get('ocr_text')}"
+                f"identity={result_data.get('identity_evidence', {}).get('identity') if result_data.get('identity_evidence') else selected.get('ocr_text')}"
             )
 
             if selected.get("overlay_path"):
@@ -422,12 +422,18 @@ class FindAndGraspMedicineSkill(BaseSkill):
         fast = None
         references = getattr(self.context, 'object_references', None)
         requested = options['query']
+        fast_options = dict(
+            segment=bool(options.get("use_sam_for_selection") or options.get("use_mask_for_grasp")),
+            detection_threshold=options.get("detection_threshold", 0.22),
+            text_threshold=options.get("text_threshold", 0.18), max_instances=options.get("max_instances", 12),
+            expand_bbox_px=options.get("expand_bbox_px", 12), target_prompts=options.get("target_prompts"))
         resolution = None
         if references is not None:
             resolver = ObjectNameResolver(references)
             resolution = resolver.lookup(requested)
             if resolution['status'] == 'needs_scene':
-                resolution = resolver.resolve_in_image(requested, self.context, options['image_path'])
+                resolution = resolver.resolve_in_image(requested, self.context, options['image_path'],
+                                                       **dict(fast_options, segment=False))
                 if resolution['status'] != 'resolved':
                     return SkillResult(False, {'failure_type': 'target_name_ambiguous', 'name_resolution': resolution},
                                        error='目标名称仍有歧义，请提供完整名称或临时绑定')
@@ -439,12 +445,19 @@ class FindAndGraspMedicineSkill(BaseSkill):
         if references is not None and not options.get("ocr_verify_strict_mode") and not options.get('skip_reference_matching'):
             fast = RecognizeObjectSkill(self.context).run(
                 image_path=options["image_path"], query=options["query"],
-                segment=bool(options.get("use_sam_for_selection") or options.get("use_mask_for_grasp")),
-                detection_threshold=options.get("detection_threshold"),
-                text_threshold=options.get("text_threshold"), max_instances=options.get("max_instances", 12),
-                expand_bbox_px=options.get("expand_bbox_px", 12))
+                **fast_options)
+            fast.data['name_resolution'] = resolution
             if fast.success:
-                fast.data['name_resolution'] = resolution
+                # Gate compares evidence.query with the caller's exact target.
+                # Keep a shared-brand/alias request attached to its resolved ID.
+                evidence = fast.data['identity_evidence']
+                evidence['resolved_query'] = evidence['query']
+                evidence['query'] = requested
+                fast.data['target_identity'] = dict(object_id=evidence['identity_id'],
+                    name=evidence['identity'], requested_name=requested)
+                return fast
+            if references.settings.recognition_policy == "reference_only":
+                fast.data.setdefault('failure_type', fast.data.get('stage', 'reference_uncertain'))
                 return fast
         legacy_options = dict(options)
         if resolution and resolution['status'] == 'resolved':

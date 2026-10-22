@@ -1,0 +1,167 @@
+观测技能改动记录：一次 DINO + MobileCLIP2-B 图库匹配
+日期：2026-10-22
+开发时基线：feat/occlusion-observation-scheduling，79ef040
+提交分支：feat/observe-mobileclip2；提交前整合共享分支最新基线 e02486d
+
+一、范围和实际调用链
+
+  原任务接口不变：robot.observe(obj)。
+  调用链：skill_lib/actions/observation.py::_observe_medicine_once
+    -> FindAndGraspMedicineSkill.run(plan_grasp=False, execute=False)
+    -> _recognize_image -> RecognizeObjectSkill -> ObjectReferenceService。
+
+  原 OCR 路线会循环 DEFAULT_TARGET_PROMPTS 的五个元素：medicine_box 加四个描述，
+  融合候选框、逐个候选提取 OCR、按任务关键词排序，再按配置验证选中目标的文字。
+  项目已有可选图库快速分支，但原来只接第一代 MobileCLIP，且失败会自动回退 OCR。
+
+  本次正式配置改为：
+    同帧 RGB-D 采集 -> 单次 DINO 药盒检测 -> 候选图批量编码
+    -> 每类最相似 3 张参考图的余弦相似度均值
+    -> 查询目标必须排名第一、相似度 >= 0.80、领先其他类别 >= 0.02
+    -> 返回选中实例和原格式 grasp_input。
+  图库仍为每张参考图片一个 512 维向量，共四类、45 张，不做每类向量平均。
+  模型/图库为进程内复用；候选特征按图像内容哈希和 bbox 缓存。
+  同一张图查询多个已登记药名可复用检测和候选编码。
+  换图、换检测参数、换检测后端会重新检测；这不是整项抓放任务只调用一次 DINO。
+
+  默认 target_name=medicine_box，检测服务一次展开以下六段文字：
+    rectangular medicine carton. pharmaceutical paper box.
+    medicine package with printed text. drug package box.
+    medicine bag. medicine package.
+  DINO 阈值仍为 0.22 / 0.18；保留原几何过滤和技能 max_instances 默认 12。
+  自定义 target_prompts 列表仍可传入，图库分支合并成一条提示进行一次检测。
+  保持既有 RGB 短边缩放到 224、中心裁剪的预处理，没有借本次接入改变识别特征。
+
+二、输入输出兼容处理
+
+  observe(obj)、FindAndGraspMedicineSkill.run(...) 的原参数和 SkillResult 保持可用。
+  成功结果保留 image_path、prompts、detections、instances、selected_instance、
+  selection_result、ranked_candidates、ocr_verification、grasp_input。
+  instances 包含全部候选，selection_result.selected_index 对应该列表中的原位置；
+  修正了旧图库快速分支只返回一个 instance、却保留原候选索引的不一致。
+  selected_instance 保留 bbox、object_id、confidence、image_path、mask/crop 字段。
+  为选中目标保存裁剪图片，供调试和既有下游代码读取。
+  grasp_input 沿用原构造函数：RGB、depth/depth_npy、相机内参、深度尺度、
+  capture_geometry、时间戳和 observation_provenance 不由新识别器生成或更改。
+  本次没有修改像素到三维、AnyGrasp、MoveIt、夹爪、放置和缓存失效规则。
+
+  未执行 OCR 时保留兼容字段：ocr_text=""、ocr_texts=[]、ocr_success=False、
+  ocr_avg_confidence=0；ocr_verification=None。绝不把药名/向量分数伪造为 OCR 结果。
+  图库依据通过 identity_evidence 返回，标明 encoder_model、identity_id、score、
+  class_margin、阈值、图库版本及图像哈希；分数不是概率。
+  selection_result.score 在该分支表示图库相似度，match_type=reference_gallery。
+  旧 OCR 参数 min_score、ocr_padding_px、merge_iou 等保留供旧路线使用；
+  图库分支的接受门槛由 references.yaml 指定。
+  原有 verify_ocr=True 不强制对已通过图库验证的目标再次 OCR；显式 strict 模式除外。
+
+  Gate 继续读取独立身份依据，并检查深度和遮挡，不以图库通过代替抓取可行性判断。
+  修正共享简称经场景消歧后证据 query 变成内部 ID 的情况：证据保留调用者 query，
+  并另存 resolved_query 和稳定 identity_id，保持 Gate 与原任务目标对得上。
+  场景消歧与最终匹配使用相同检测参数，避免因此追加一次检测。
+
+三、失败和旧流程兼容
+
+  本地配置 recognition_policy=reference_only：未登记、低相似度、类别分差不足、
+  空检测或模型错误都明确返回失败，不自动再跑五次 DINO 和 OCR。
+  保留原扫描/重新观察机制，由上层决定换视角或结束任务。
+  注册新药品/别名请继续使用 hardware.reference_cli；图库中未登记的名称不会被猜测匹配。
+
+  显式兼容入口：
+    recognition_policy: reference_then_ocr  恢复“图库优先，失败回退 OCR”；
+    enabled: false                         停用图库，走原路线；
+    skip_reference_matching=True           单次强制旧路线；
+    ocr_verify_strict_mode=True              保留原严格 OCR 语义。
+  旧 YAML 未声明新字段时保留第一代编码器及自动 OCR 回退语义；新模板显式选用第二代。
+  第一代权重/向量库未删除，但正式本地配置不再加载第一代模型。
+  原 inspect_medicine_candidates 近距离逐候选 OCR 实验技能仍保留；它不是
+  robot.observe(obj) 的任务入口，本次不改其近距离移动和全场景 OCR 实验行为。
+  grasp() 使用同一个 _recognize_image，因此它内部的身份识别同步采用新路线；
+  观测与抓取之间原有图像/位姿缓存有效性检查仍然生效。
+
+四、修改文件
+
+  services/reference_encoder.py（新增）
+    懒加载 MobileCLIP2-B、本地 checkpoint、与已验证图库一致的预处理及批量编码。
+  services/object_reference_service.py
+    新模型/策略配置；模型专属缓存键；加载已有第二代向量库；记录编码器身份。
+    载入预建库检查模型、权重哈希、预处理、向量文件哈希、归一化和逐行身份。
+    按稳定身份编号和图片哈希重排，避免 gallery.json 与建库时顺序不同造成类别错配。
+    新增参考图导致预建库不全时重建本地特征缓存；不兼容/损坏库返回错误。
+  services/detection_prompts.py（新增）、services/grounding_dino_detector_service.py
+    共享原六段药盒描述；新增列表合并，不改变原检测模型和描述内容。
+  skill_lib/perception/reference_recognition.py
+    一次检测调度、完整候选接口、独立身份证据、失败证据和调用日志。
+  skill_lib/combound/find_and_grasp_medicine.py、services/object_names.py
+    按策略决定回退，统一消歧参数，保留调用者身份和旧入口。
+  config/perception/references.example.yaml、requirements-reference-recognition.txt
+    正式模型和策略模板；修正旧模板 top_k_refs/log_path 与实际配置字段不匹配的问题。
+  tests/test_observe_gallery.py（新增）、scripts/check_core.py
+    17 项新回归；将图库相关 CPU 测试加入项目规定的离线验收入口。
+  skill_lab/test_observe_gallery_offline.py（新增）
+    使用正式识别函数、真实模型和保存照片的离线回放，断言每帧一次检测/批量编码。
+  docs/reference_recognition.txt、THIRD_PARTY.md
+    标明旧说明是历史记录，并指向本次迁移说明。
+  本机 config/perception/references.yaml 同步更新；本机配置、模型和向量缓存不提交。
+  最新共享分支已纳入图库清单和参考照片，本次功能提交不改动这些共享数据。
+
+五、本机配置及复现
+
+  正式权重：models/mobileclip2-b/mobileclip2_b.pt
+  权重 SHA256：144b1344f5f01f08af8be1077f0db5eec95bf0fd1e349c1e9ca6102724448486
+  预建库：data/object_gallery/vector_libraries/mobileclip2_b/index.npz
+  编码器：encoder_model: mobileclip2_b；策略：recognition_policy: reference_only。
+  Agent 的硬件 profile 必须通过 perception.reference_config 指向该配置，重启进程生效。
+
+  已在本机 .venv-mobileclip2 中补齐 DINO/技能离线所需依赖，pip check 通过。
+  验证栈：Python 3.10、torch 2.9.1、torchvision 0.24.1、open_clip_torch 3.3.0、
+  timm 1.0.30、transformers 5.5.4、numpy 1.26.4、scipy 1.15.3。
+  实机 Agent 解释器也必须具备这些兼容的识别依赖；仅修改权重路径不足以切换模型。
+  本环境是离线识别环境，没有替实验室机器人配置 ROS、相机、夹爪或标定。
+
+  在项目根目录执行：
+    .venv-dev/bin/python scripts/check_core.py
+    .venv-dev/bin/python -m pytest -q tests/test_observation_memory.py tests/test_perception_pipeline.py tests/test_reference_capture.py
+
+  真实照片回放（只读图，不启动任何硬件；需要 GPU）：
+    .venv-mobileclip2/bin/python -B skill_lab/test_observe_gallery_offline.py \
+      --images data/object_gallery/test_image \
+      --output runs/observe_mobileclip2_replay_new
+
+  可追加 --visual-reference runs/dino_gallery_test_20261022/run_20261022_161336/visual_reference.json
+  核对本轮五张照片的人工参考框。换照片后需相应更换标签，不要沿用旧标签评新图。
+  每次识别明细：runs/reference_recognition/<id>/recognition.json。
+
+六、验收结果与限制
+
+  修改前的 88 项相关测试全部通过；修改后项目规定的 check_core 为 140 passed。
+  另行覆盖观察缓存、感知调度和图库采集：54 passed、2 skipped（可选 UI 环境）。
+  提交前基于 e02486d 的干净工作副本检查：check_core 为 387 passed、2 skipped；
+  包含共享分支新增的便携测试，并通过 prepare_release.py --check-tracked（386 文件）。
+  17 项新增回归包括：原返回字段和索引、RGB-D 元数据、Gate 身份证据、别名/共享简称、
+  空检测/未知目标/歧义/模型错误零 OCR 回退、旧流程显式开关、缓存模型隔离、预建库行映射和损坏拒绝。
+
+  真实照片回放：5 张图、每张查询四类药，共 20 次查询；
+    DINO 调用 5 次，候选编码 5 批，OCR/SAM/LLM 调用均为 0；
+    15 个已知药盒正确定位，5 次蒙脱石散查询拒绝，无已接受目标错配；
+    图库首次从已验证预建库加载，无需重新编码全部参考图。
+  352 个候选类别分数与之前独立评测结果对齐，最大绝对差 2.8e-7。
+  模型已加载时，每张新图的首个目标查询约 0.41–0.59 秒，包括检测、候选编码、
+  匹配和选中裁剪保存；不含采集、DINO 初始化、三维计算和运动。首张查询约 4.71 秒，
+  包含第二代编码器首次加载，不含此前 DINO 和图库初始化，不能当作完整启动耗时。
+
+  曾尝试直接收集完整 tests：开发环境缺少可选仿真/Torch 包；在感知环境排除仿真后，
+  仍有 102 failed、6 errors，主要需要未配置的 fr3.yaml、实机标定和相机等依赖。
+  这些非便携测试未作为本次验收，不为让测试变绿而伪造实机配置；最终按 docs/SETUP.md
+  规定的离线入口验收。没有完成实机 RGB-D、AnyGrasp 或抓放端到端验证。
+  本轮阈值是在当前照片上试调的，后 3 张图画面相近；不是独立场景准确率评估。
+
+  结果目录：runs/observe_mobileclip2_migration_20261022/
+    before/             修改前源码和本地配置备份，含用户原有 core/actions.py 差异记录
+    replay/results.json 真实模型回放完整返回结果
+    replay/summary.json 回放汇总
+    score_parity.json    与此前评测分数的逐项核对
+    changes.patch       本次源码差异（不含用户原有修改）
+    validation.json     本次检查结果记录
+
+  本次功能提交包含相关源码、配置模板、依赖、测试和说明；不包含本机配置、权重、图库及运行结果。
+  用户原有 core/actions.py 批注和既有技能方案文档保留在工作目录，不纳入本次功能提交。

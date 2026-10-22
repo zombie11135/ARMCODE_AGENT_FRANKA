@@ -1,4 +1,9 @@
-参考图片特征库与识别调度（2026-10-14）
+当前版本说明（2026-10-22）
+  正式配置改为 MobileCLIP2-B、一次 DINO、reference_only；不确定时不自动回退 OCR。
+  本文件后续内容保留为 2026-10-14 历史实现记录。当前安装、接口兼容、回放命令和回退方式，
+  请阅读 docs/observe_mobileclip2_20261022.txt。
+
+参考图片特征库与识别调度（2026-10-14，历史记录）
 
 项目：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
 Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
