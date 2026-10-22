@@ -78,6 +78,11 @@ config/calibration/*.yaml
 config/calibration/*result*.json
 config/calibration/source/
 anyplace_real/config/real_saved_xarm_snapshot.json
-data/
+/data/*
+!/data/object_gallery/
+/data/object_gallery/*
+!/data/object_gallery/gallery.json
+!/data/object_gallery/images/
+!/data/object_gallery/captures/
 releases/
 dist/

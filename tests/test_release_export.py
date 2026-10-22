@@ -68,3 +68,38 @@ def test_symlinks_and_tracked_local_files_rejected(tmp_path):
         audit(tmp_path, source_files(tmp_path))
     with pytest.raises(ValueError, match="boundary"):
         audit(tmp_path, [Path("config/local.env")])
+
+
+def test_export_includes_gallery_assets_without_caches_or_other_data(tmp_path):
+    import hashlib
+    import json
+
+    root = tmp_path / "workspace"
+    assets = ("data/object_gallery/gallery.json",
+              "data/object_gallery/images/reference.png",
+              "data/object_gallery/images/reference.jpg",
+              "data/object_gallery/captures/sample/color.png",
+              "data/object_gallery/captures/sample/capture.json")
+    for name in assets:
+        path = write(root, name, "{}" if name.endswith(".json") else "")
+        if not name.endswith(".json"):
+            path.write_bytes(b"\x89PNG\r\n\x1a\n\xff")
+    excluded = ("data/other/private.json", "data/object_gallery/.lock",
+                "data/object_gallery/features/cache.npz",
+                "data/object_gallery/images/private.json",
+                "data/object_gallery/captures/sample/depth.npz",
+                "data/object_gallery/captures/sample/.env",
+                "services/data/private.json")
+    for name in excluded:
+        write(root, name)
+    destination = tmp_path / "release"
+    assert export(root, destination) == len(assets)
+    manifest = json.loads((destination / "RELEASE_MANIFEST.json").read_text())["sha256"]
+    assert set(manifest) == set(assets)
+    for name in assets:
+        assert (destination / name).read_bytes() == (root / name).read_bytes()
+        assert manifest[name] == hashlib.sha256((root / name).read_bytes()).hexdigest()
+    for name in excluded:
+        assert not (destination / name).exists()
+        with pytest.raises(ValueError, match="boundary"):
+            audit(root, [Path(name)])
