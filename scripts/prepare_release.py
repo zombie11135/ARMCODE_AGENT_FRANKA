@@ -1,4 +1,4 @@
-"""Export a source snapshot without Git history, vendor code or local assets.
+"""Export a source snapshot without Git history, vendor code or machine-local assets.
 
 Only Python's standard library is required. The existing checkout is never
 changed. A path allowlist defines the release boundary; extend it deliberately.
@@ -48,13 +48,22 @@ def allowed(relative):
     relative = Path(relative)
     if relative.is_absolute() or ".." in relative.parts:
         return False
-    if any(p in EXCLUDED_DIRS or p.startswith(".venv") for p in relative.parts):
+    gallery = relative.parts[:2] == ("data", "object_gallery")
+    checked_parts = relative.parts[1:] if gallery else relative.parts
+    if any(p in EXCLUDED_DIRS or p.startswith(".venv") for p in checked_parts):
         return False
     name = relative.name
     if name == "licenseCfg.json" or name.endswith((".lic", ".key", ".pem", ".public_key", ".signature")):
         return False
     if name.startswith(".env") or ".local." in name or ".private." in name:
         return False
+    if gallery:
+        if relative.as_posix() == "data/object_gallery/gallery.json":
+            return True
+        if len(relative.parts) == 4 and relative.parts[2] == "images":
+            return relative.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
+        return (len(relative.parts) == 5 and relative.parts[2] == "captures"
+                and name in {"color.png", "capture.json"})
     if relative.as_posix() in EXTRA_FILES:
         return True
     if relative.parts[0] == "config":
@@ -69,10 +78,14 @@ def allowed(relative):
 def source_files(root):
     selected = []
     for directory, children, names in os.walk(root, followlinks=False):
-        children[:] = sorted(n for n in children if n not in EXCLUDED_DIRS and not n.startswith(".venv"))
+        children[:] = sorted(n for n in children
+                             if (n not in EXCLUDED_DIRS or (Path(directory) == root and n == "data"))
+                             and not n.startswith(".venv"))
         # Do not traverse directories outside the explicitly maintained scope.
         if Path(directory) == root:
-            children[:] = [n for n in children if n in SOURCE_DIRS or n == "config"]
+            children[:] = [n for n in children if n in SOURCE_DIRS or n in {"config", "data"}]
+        elif Path(directory) == root / "data":
+            children[:] = [n for n in children if n == "object_gallery"]
         for name in sorted(names):
             relative = (Path(directory) / name).relative_to(root)
             if allowed(relative) and name != "RELEASE_MANIFEST.json":
@@ -104,7 +117,7 @@ def audit(root, files):
                 # Never echo matched text or token values.
                 errors.append(f"{relative}:{line}: possible credential (redacted)")
                 break
-        if path.suffix != ".png":
+        if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
             try:
                 data.decode("utf-8")
             except UnicodeDecodeError:

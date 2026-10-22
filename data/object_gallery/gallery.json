@@ -1,0 +1,430 @@
+{
+  "schema_version": 2,
+  "objects": [
+    {
+      "name": "布洛芬",
+      "category": "medicine_box",
+      "detector_prompt": "medicine package",
+      "aliases": [],
+      "references": [
+        {
+          "path": "images/20adb67dc89629a7a593b63e7fdfc749c3c2cad63d6acfad30f1d337f4ae0422.png",
+          "sha256": "20adb67dc89629a7a593b63e7fdfc749c3c2cad63d6acfad30f1d337f4ae0422",
+          "source_image_sha256": "c4bbb6da1dab3c479b2667faf3a36fa0793e76686b806facb970e6a9655e8ac0",
+          "source_group": "20260520_103459_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/5c8cd004a2f65cd6d8cfb7e0d104651e6bb5cb3719350b34377730a7c0fa1e3e.png",
+          "sha256": "5c8cd004a2f65cd6d8cfb7e0d104651e6bb5cb3719350b34377730a7c0fa1e3e",
+          "source_image_sha256": "2002f296fdaf97d79bec2e81742aec7b3f303c198cac93f47c4fbd20d9797b55",
+          "source_group": "20260520_110638_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/b5b1ad67dfbd5a127be9621cf99c380790303d434fa27c299f6c6aefe88dab17.png",
+          "sha256": "b5b1ad67dfbd5a127be9621cf99c380790303d434fa27c299f6c6aefe88dab17",
+          "source_image_sha256": "23b3cf11f27ada96c3fb3d9f24ee58bc5cba101b9d8c476ecd55f1ad4866de82",
+          "source_group": "20260520_111506_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/e9c0f82d1c270da378cd72477f1b6b2c631c4b9b79fd9950799395bc0ae3a011.png",
+          "sha256": "e9c0f82d1c270da378cd72477f1b6b2c631c4b9b79fd9950799395bc0ae3a011",
+          "source_image_sha256": "ea7c2c59847f49d9b590eb56c93a6712154584357e0a075f70235b1285d1d909",
+          "source_group": "20260520_114521_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/37fd76754c576991d5590b01006dbfe522374e6326ae146205112adbf0a3a08a.png",
+          "sha256": "37fd76754c576991d5590b01006dbfe522374e6326ae146205112adbf0a3a08a",
+          "source_image_sha256": "90c0286d0cfadd5d47dbe4862b9665593242cef8a80c0b765b09a36c5c889995",
+          "source_group": "20260520_114645_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/0d48a49c8cad467261bb12b10f2431e8001cf9ed1137027d29b28f72d7badce8.png",
+          "sha256": "0d48a49c8cad467261bb12b10f2431e8001cf9ed1137027d29b28f72d7badce8",
+          "source_image_sha256": "686cb91c137911dba682a109fb742251dcf6bd6f60eb181f0af82e3a495d6a5e",
+          "source_group": "20260520_115611_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/71c808d4b4474c3642e9e65cb4cd6acbf7285bc2154970fcb24ae49b233a5f51.png",
+          "sha256": "71c808d4b4474c3642e9e65cb4cd6acbf7285bc2154970fcb24ae49b233a5f51",
+          "source_image_sha256": "c4c3e1ae6e8b4b7ebfba1519e8de4b071341e6c9f0c35870eb65ebfbe0d49fdd",
+          "source_group": "20260520_120052_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/f893519500f0b6e9f1a946c8cd8cd0e0b5ecb0d4843481e17981cb8d576d6193.png",
+          "sha256": "f893519500f0b6e9f1a946c8cd8cd0e0b5ecb0d4843481e17981cb8d576d6193",
+          "source_image_sha256": "77404be7f1c921591efe17ea6b99273f0b954f5e7637afaee06e15748f4f8b26",
+          "source_group": "20260520_120245_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/28c3d390e4548574ef76c0c7a8990443e687c65ea47137ea695bae3ab2d4ee56.png",
+          "sha256": "28c3d390e4548574ef76c0c7a8990443e687c65ea47137ea695bae3ab2d4ee56",
+          "source_image_sha256": "86c772aba3a318b2cc570d76af1250e604da80ebd681e03145dee2ef661dc63f",
+          "source_group": "20260520_121108_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/175f0b5c107972b037af9b75cb966ac7e3deeb47b06f04c099d005f959fa94c5.png",
+          "sha256": "175f0b5c107972b037af9b75cb966ac7e3deeb47b06f04c099d005f959fa94c5",
+          "source_image_sha256": "33b39fdb41c1175501142aa81bd40d94b74c8f7b764c2e5726d84442aca31319",
+          "source_group": "20260520_121543_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/1f608bb1353fa2f7f3d0d68770bb78b2314d13f41c71a3d0536f8a7910653e09.png",
+          "sha256": "1f608bb1353fa2f7f3d0d68770bb78b2314d13f41c71a3d0536f8a7910653e09",
+          "source_image_sha256": "17fed6a1f10158837df4d7a22111c8072903c72c7c261f9555994c8016d674fb",
+          "source_group": "20260520_122814_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/89088f63fb7bead7af00651919d1c70b175156a02360403159b35cdd2f64a0ca.png",
+          "sha256": "89088f63fb7bead7af00651919d1c70b175156a02360403159b35cdd2f64a0ca",
+          "source_image_sha256": "c1e8cf4b5e60e447bfa35f4c433cdb31fe698d252da09e69cc27b3ee4b7dffa8",
+          "source_group": "20260520_122837_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/7c023661cdc3feb5e90edf8016f099fea2f0a508437f279948729e8abb0675bb.png",
+          "sha256": "7c023661cdc3feb5e90edf8016f099fea2f0a508437f279948729e8abb0675bb",
+          "source_image_sha256": "8dd77c7d812f26468b44cfc55219caf1c9102395aff399e9c71f8b2fe0c8382d",
+          "source_group": "20260520_123127_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/f721906d0de8b035b6f262f322109411b20eab0a1439c9d87e17c454c55259b1.png",
+          "sha256": "f721906d0de8b035b6f262f322109411b20eab0a1439c9d87e17c454c55259b1",
+          "source_image_sha256": "5f8def8a19b6803f2ac5d2b6bedfe5c58072b82a218e67ee1ce8f9d1f5c7ec53",
+          "source_group": "20260520_132039_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/220fee99ad5dd44eddf7faeb428901ba0c206cbb0377e78a63c3f3afd333b90e.png",
+          "sha256": "220fee99ad5dd44eddf7faeb428901ba0c206cbb0377e78a63c3f3afd333b90e",
+          "source_image_sha256": "914db8c0b6b9d8fed75dbf21e3ba687cf756c773d21ee58a92558a2284ba019f",
+          "source_group": "20260520_132617_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/5e853365a3b3daf71d43bf22cfafbee6bf5fa20c620e95bcbc2ec0feeb678533.png",
+          "sha256": "5e853365a3b3daf71d43bf22cfafbee6bf5fa20c620e95bcbc2ec0feeb678533",
+          "source_image_sha256": "a4441c4d0eea6b39c913017822f83d0716d5a81216c4a18ac5ed355c08addaf3",
+          "source_group": "20260520_133953_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/e40a1537e88738d70cb37573083e5395ada4994a4ce0d55faae6ff4d6cba77a9.png",
+          "sha256": "e40a1537e88738d70cb37573083e5395ada4994a4ce0d55faae6ff4d6cba77a9",
+          "source_image_sha256": "eedcb55ee30f2c321f1022df42635c74a50d27f021841616e81d423a2e4dbdf1",
+          "source_group": "20260520_134046_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/1b521633275e7dbd50a50ef081e8dc9a35267a2655d0bb653883b7ec2fc963da.png",
+          "sha256": "1b521633275e7dbd50a50ef081e8dc9a35267a2655d0bb653883b7ec2fc963da",
+          "source_image_sha256": "1a493b0f018d697e9fd3ce7e1bdd3e4132f92034fe4de0d0708eeffe16efa3dd",
+          "source_group": "20260520_134147_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/0cd16f68d62365f56cb524f87f9a7eed968eeb53a6e63d715112dae45e59f410.png",
+          "sha256": "0cd16f68d62365f56cb524f87f9a7eed968eeb53a6e63d715112dae45e59f410",
+          "source_image_sha256": "3b3c37ebbf7ee574c141a8bb6c227c3e24d423650fb61ff86385dfbb44c71eec",
+          "source_group": "20260520_134408_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/f71e7a20fa853865e8ae4f5d51e39a4239951815b14935086ff045f522fc1da3.png",
+          "sha256": "f71e7a20fa853865e8ae4f5d51e39a4239951815b14935086ff045f522fc1da3",
+          "source_image_sha256": "5fa5e1828549814084b1f607e3c560f99a811d022f5ff7b2af1bb5ca41781b25",
+          "source_group": "20260521_195035_布洛芬",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        }
+      ],
+      "object_id": "ref_1519d8ac329f5ca0882c",
+      "attributes": {},
+      "descriptors": []
+    },
+    {
+      "name": "蒙脱石散",
+      "category": "medicine_box",
+      "detector_prompt": "medicine package",
+      "aliases": [],
+      "references": [
+        {
+          "path": "images/2936a26d8e90008ec3d2f704f74c1f8b67b2329a7ffe71a8bc45c236931b8197.png",
+          "sha256": "2936a26d8e90008ec3d2f704f74c1f8b67b2329a7ffe71a8bc45c236931b8197",
+          "source_image_sha256": "5e6186a4f4591fc7c19aff88f5e136823d75539f150e355e80e533cede2d8adc",
+          "source_group": "20260520_121717_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/1df0ef877ef7391a4ada5e806ca1717a2bc7c1f2d7c4effb1de19705cbf77ba8.png",
+          "sha256": "1df0ef877ef7391a4ada5e806ca1717a2bc7c1f2d7c4effb1de19705cbf77ba8",
+          "source_image_sha256": "47e5ec99b78672ef997bf189d5d7cb5f959d22874395f8dbfb5c5525e2792865",
+          "source_group": "20260520_123237_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/a1084fb1b98642d8a455a4d03afc47032c73aac05ebec8160487be4c7ab8fdda.png",
+          "sha256": "a1084fb1b98642d8a455a4d03afc47032c73aac05ebec8160487be4c7ab8fdda",
+          "source_image_sha256": "20c7e06f81960f5b403a3a73e6ec4f544db30736744dec14645604b073e2f54e",
+          "source_group": "20260520_123441_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/fb76b9840c3743d856561efa17d4ad82b9cf9c11839a7c8d31f09876d2017464.png",
+          "sha256": "fb76b9840c3743d856561efa17d4ad82b9cf9c11839a7c8d31f09876d2017464",
+          "source_image_sha256": "76d2ac5c189c74cc6f91325534f0b4e2defb059563a52959520815026af1eca6",
+          "source_group": "20260520_133125_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/b86f92dd44b1f6538cb24cbd9cfcae84801d19192dd63e2a418e270522ad0d54.png",
+          "sha256": "b86f92dd44b1f6538cb24cbd9cfcae84801d19192dd63e2a418e270522ad0d54",
+          "source_image_sha256": "c913add3c728ccc780c438cebaad7e6e751296a94c7f5c450a6e2544f257d0c6",
+          "source_group": "20260520_133519_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/b4d3bb65203d325e01e52d47111d481c54ac2e1f41f93a0e5c1a956ca1d0cf21.png",
+          "sha256": "b4d3bb65203d325e01e52d47111d481c54ac2e1f41f93a0e5c1a956ca1d0cf21",
+          "source_image_sha256": "103f75ec7b73ee56cf73e52c8a3a9b6ff3b2fc2e6ea3df9d8538cff58e06b8b3",
+          "source_group": "20260521_194731_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/db37caa9e83ecd36e38f1e0c5a5e28debc8d391920c2be64f244bc21924f120c.png",
+          "sha256": "db37caa9e83ecd36e38f1e0c5a5e28debc8d391920c2be64f244bc21924f120c",
+          "source_image_sha256": "d622ab69ee4f0cbe3ec5d81ef1d82039a555835fabf0b5060ac5974b0dd07b09",
+          "source_group": "20260521_195123_蒙脱石散",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        }
+      ],
+      "object_id": "ref_cfb86219ca5e50dd894d",
+      "attributes": {},
+      "descriptors": []
+    },
+    {
+      "name": "西瓜霜",
+      "category": "medicine_box",
+      "detector_prompt": "medicine package",
+      "aliases": [],
+      "references": [
+        {
+          "path": "images/bb796099075bb5b554ba2c28df977fcb6198e46aa9a7400ed3d71061a25cdf60.png",
+          "sha256": "bb796099075bb5b554ba2c28df977fcb6198e46aa9a7400ed3d71061a25cdf60",
+          "source_image_sha256": "e6dea01620fb6ef9f8acc530beacb35ff2ce4ea177933fa32c50f09ca57b4836",
+          "source_group": "20260520_122657_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/41d195e889401ad2882b5c2a66a153c13bf6b0348b97f2f60da5efdde5829adb.png",
+          "sha256": "41d195e889401ad2882b5c2a66a153c13bf6b0348b97f2f60da5efdde5829adb",
+          "source_image_sha256": "7eaca1118f89805a4daddb98327e2509b833785a36c925ecb13b270fb65d5780",
+          "source_group": "20260520_131029_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/584db0c9d0f5cc744de76a30ac438f205592e460e2e61e18e8c4c42cfa5d00ac.png",
+          "sha256": "584db0c9d0f5cc744de76a30ac438f205592e460e2e61e18e8c4c42cfa5d00ac",
+          "source_image_sha256": "943be99597a40d75b08a770ccc621cc495a21cc993be7908972a078d69d1e734",
+          "source_group": "20260520_131624_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/3672f29cd8666a8661ee03c9e2e3b1a4fdafe40c440e13eb7541383e397d1975.png",
+          "sha256": "3672f29cd8666a8661ee03c9e2e3b1a4fdafe40c440e13eb7541383e397d1975",
+          "source_image_sha256": "daaacd00e31ee4c99118d794f52be677ab8964fc05f9438dc5a8912bf0b6a6ec",
+          "source_group": "20260520_131758_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/9dc81615c38d86e5fe76d539d63d8d46e1a1473694fef601dd5f1c629daaee5e.png",
+          "sha256": "9dc81615c38d86e5fe76d539d63d8d46e1a1473694fef601dd5f1c629daaee5e",
+          "source_image_sha256": "0110db58924879084aadac724cbf079f50b4212a789eeb801211aa054d8a3924",
+          "source_group": "20260520_131948_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/67312c4c134b8d758bd56915762fa14a5afd04bda18e70700ef88ae103a4ae24.png",
+          "sha256": "67312c4c134b8d758bd56915762fa14a5afd04bda18e70700ef88ae103a4ae24",
+          "source_image_sha256": "1adc93f4e5409daf4b080f2a1c37ad59d1e40a82e87cf138db501f14e0419578",
+          "source_group": "20260520_132327_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/5485aa2c7f78a469bb3fd917b85cc594c25079fc64ff0184d91e3f03b79863bb.png",
+          "sha256": "5485aa2c7f78a469bb3fd917b85cc594c25079fc64ff0184d91e3f03b79863bb",
+          "source_image_sha256": "fc06f93691c2c39447ad568d202a40e0333029eb938949a1d1e1e8314c9a1bce",
+          "source_group": "20260520_132523_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/4e670017ecc6b72cd55f199b17c6ef99ab4c32021012117d295a73f0c886d2f0.png",
+          "sha256": "4e670017ecc6b72cd55f199b17c6ef99ab4c32021012117d295a73f0c886d2f0",
+          "source_image_sha256": "b22e62b80067ea3a0164c4067aadeaa6ec8bfada61dfba7a508b75fb3813eb68",
+          "source_group": "20260520_133343_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/ef35abfb4e324a94d7a0a6ea4cfc44416e70f51b0303d79df7adb9f488ae4579.png",
+          "sha256": "ef35abfb4e324a94d7a0a6ea4cfc44416e70f51b0303d79df7adb9f488ae4579",
+          "source_image_sha256": "ee46a571c7a3fa9b4c62f80ab8002b1c668936f5f7f270548aa7d331ebd90feb",
+          "source_group": "20260521_195237_西瓜霜",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/905e96b8fe414365afd3f04e7c4720087b46ab609e9190298c6d6c582e44c251.png",
+          "sha256": "905e96b8fe414365afd3f04e7c4720087b46ab609e9190298c6d6c582e44c251",
+          "source_image_sha256": "426f07f4ae66ed2f8e7bbdc77a516ee99fbbfbbeaca7bc3d0f148aee842b2974",
+          "source_group": "registration_599bf76cb77e4a80b434ff9fb7a8381e",
+          "provenance": "user_reference_capture",
+          "viewpoint": "front",
+          "capture": {
+            "source": "realsense_rgb",
+            "camera_role": "wrist",
+            "device_serial": "349622072103",
+            "captured_at_utc": "2026-10-14T11:36:09.241538+00:00",
+            "frame_number": 142,
+            "sensor_timestamp_ms": 1791977769083.274,
+            "width": 640,
+            "height": 480,
+            "capture_id": "dcadf3dfe1f0433f86023736b2f8d398",
+            "bbox": [
+              245,
+              87,
+              436,
+              357
+            ],
+            "viewpoint": "front",
+            "source_path": "captures/dcadf3dfe1f0433f86023736b2f8d398/color.png",
+            "requested_name": "西瓜霜",
+            "saved_at_utc": "2026-10-14T11:36:19.347766+00:00"
+          }
+        },
+        {
+          "path": "images/9e288affeedf2f324c9510883497cfb005fefae78a0262757ce170a8e64e02d9.png",
+          "sha256": "9e288affeedf2f324c9510883497cfb005fefae78a0262757ce170a8e64e02d9",
+          "source_image_sha256": "419649cf1a815afcc5a0cae3846bc71c7413fd6b4b155fe3b383766b351ec538",
+          "source_group": "registration_599bf76cb77e4a80b434ff9fb7a8381e",
+          "provenance": "user_reference_capture",
+          "viewpoint": "front",
+          "capture": {
+            "source": "realsense_rgb",
+            "camera_role": "wrist",
+            "device_serial": "349622072103",
+            "captured_at_utc": "2026-10-14T11:36:40.143930+00:00",
+            "frame_number": 327,
+            "sensor_timestamp_ms": 1791977799981.6838,
+            "width": 640,
+            "height": 480,
+            "capture_id": "0b8796c3393d443aaed3bb256bea2ec6",
+            "bbox": [
+              227,
+              62,
+              583,
+              315
+            ],
+            "viewpoint": "front",
+            "source_path": "captures/0b8796c3393d443aaed3bb256bea2ec6/color.png",
+            "requested_name": "西瓜霜",
+            "saved_at_utc": "2026-10-14T11:36:46.651609+00:00"
+          }
+        },
+        {
+          "path": "images/64e5f1eecf51177266a6250717f4f6754a35af17032d3967ee816451b42f873d.png",
+          "sha256": "64e5f1eecf51177266a6250717f4f6754a35af17032d3967ee816451b42f873d",
+          "source_image_sha256": "2f3972d3d1e803b0c0fad6bb1aea7d84932d5af2b659a1e4e64947992f253127",
+          "source_group": "registration_599bf76cb77e4a80b434ff9fb7a8381e",
+          "provenance": "user_reference_capture",
+          "viewpoint": "front",
+          "capture": {
+            "source": "realsense_rgb",
+            "camera_role": "wrist",
+            "device_serial": "349622072103",
+            "captured_at_utc": "2026-10-14T11:36:59.352348+00:00",
+            "frame_number": 442,
+            "sensor_timestamp_ms": 1791977819189.0425,
+            "width": 640,
+            "height": 480,
+            "capture_id": "f106f7a7ad624a228880d4f65dafe255",
+            "bbox": [
+              202,
+              80,
+              552,
+              331
+            ],
+            "viewpoint": "front",
+            "source_path": "captures/f106f7a7ad624a228880d4f65dafe255/color.png",
+            "requested_name": "西瓜霜",
+            "saved_at_utc": "2026-10-14T11:37:02.725229+00:00"
+          }
+        }
+      ],
+      "object_id": "ref_a09c4c218d325a46971f",
+      "attributes": {},
+      "descriptors": []
+    },
+    {
+      "name": "抗病毒口服液",
+      "category": "medicine_box",
+      "detector_prompt": "medicine package",
+      "aliases": [],
+      "references": [
+        {
+          "path": "images/09ecaddc6c203979c56c6c77dda6b5102a61bb5bad54d9358e4abb9c190f51bf.png",
+          "sha256": "09ecaddc6c203979c56c6c77dda6b5102a61bb5bad54d9358e4abb9c190f51bf",
+          "source_image_sha256": "42a4dfd033f4e049864b4ce31dbf1a26526173441439223350e9b7f94700fff7",
+          "source_group": "20260520_123533_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/eb9c6bfdec7bea093a2c61a6a9a72f6cb583ad2e5096b38eda6d2f7cb14a94dc.png",
+          "sha256": "eb9c6bfdec7bea093a2c61a6a9a72f6cb583ad2e5096b38eda6d2f7cb14a94dc",
+          "source_image_sha256": "2ccde8fec8be6aaec8815d4f4f4c41ef5db2bdbb866960fba4e1b8362ed5c8e2",
+          "source_group": "20260520_130415_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/ac3b34beec62d2b5381b6bd0369e08a5f861d0ff6a73291afebc36f19dafde19.png",
+          "sha256": "ac3b34beec62d2b5381b6bd0369e08a5f861d0ff6a73291afebc36f19dafde19",
+          "source_image_sha256": "b564e86a119e7e38b4b2cc3188ec9798673152b6459c7e167ff4c2a57ce428c7",
+          "source_group": "20260520_130556_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/80b5e79888fc2167a74cee3fc3f4d1ad85a1a5e0b1210cdc2bb8fff2a653c484.png",
+          "sha256": "80b5e79888fc2167a74cee3fc3f4d1ad85a1a5e0b1210cdc2bb8fff2a653c484",
+          "source_image_sha256": "0b99fd446ad40c73ade0a81e68cfb7f0200977c2276b4394fd945169acd31e33",
+          "source_group": "20260520_132857_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/706fb62f126b50947704360fae513135b52bc4c964bb0d1ffbee9f15c5d127cf.png",
+          "sha256": "706fb62f126b50947704360fae513135b52bc4c964bb0d1ffbee9f15c5d127cf",
+          "source_image_sha256": "38b3046ee9e75ce4fb73c8aea0ce7bd785bb8af2eff6e735630959da042fff31",
+          "source_group": "20260520_134240_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        },
+        {
+          "path": "images/72d1a815dd0ccf1d7ea927f7efd56d73514e5b11ad97ec505e845be463a1222f.png",
+          "sha256": "72d1a815dd0ccf1d7ea927f7efd56d73514e5b11ad97ec505e845be463a1222f",
+          "source_image_sha256": "b96a3a9dcca7aa1a1f04bdf9ba36f90347b0ffd4d1b64e0221088279398ec450",
+          "source_group": "20260520_134549_抗病毒口服液",
+          "provenance": "historical_snapshot_label_not_new_manual_annotation"
+        }
+      ],
+      "object_id": "ref_2a194e828c2b526e8f7b",
+      "attributes": {},
+      "descriptors": []
+    }
+  ]
+}

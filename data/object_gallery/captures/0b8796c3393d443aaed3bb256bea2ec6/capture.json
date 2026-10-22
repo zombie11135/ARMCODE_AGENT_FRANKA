@@ -1,0 +1,21 @@
+{
+  "source": "realsense_rgb",
+  "camera_role": "wrist",
+  "device_serial": "349622072103",
+  "captured_at_utc": "2026-10-14T11:36:40.143930+00:00",
+  "frame_number": 327,
+  "sensor_timestamp_ms": 1791977799981.6838,
+  "width": 640,
+  "height": 480,
+  "capture_id": "0b8796c3393d443aaed3bb256bea2ec6",
+  "bbox": [
+    227,
+    62,
+    583,
+    315
+  ],
+  "viewpoint": "front",
+  "source_path": "captures/0b8796c3393d443aaed3bb256bea2ec6/color.png",
+  "requested_name": "西瓜霜",
+  "saved_at_utc": "2026-10-14T11:36:46.651609+00:00"
+}

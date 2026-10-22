@@ -36,7 +36,9 @@ cp config/calibration/fr3_handeye.example.yaml config/calibration/fr3_handeye.ya
 模板的 `stack: fake` 仍需要外部 ROS / MoveIt 工作区；它不是内置仿真器。
 真实设备需使用与其匹配的 profile 和经过验证的标定。
 标定模板是 `status: pending`、空矩阵，不能用于抓取；不要用单位矩阵冒充测量结果。
-这些本机文件均被 Git 忽略，发布包不包含旧电脑的实际标定和图库。
+这些本机配置文件均被 Git 忽略，发布包不包含旧电脑的实际标定。
+`data/object_gallery/` 中的图库清单、参考图片和采集记录随仓库同步；
+`features/` 特征缓存和 `.lock` 运行锁保留在本机，首次识别时会自动生成。
 
 FR3 适配器依赖另行部署的 Docker Compose / ROS 2 / MoveIt 2 工作区，至少包括
 `compose.yaml`、`real` / `fake` 服务和工作区中的机器人配置。该工作区不随 Python 源码分发。
