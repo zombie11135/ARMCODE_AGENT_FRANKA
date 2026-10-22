@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "tag": "observe-assets-20261022",
+  "code_commit": "7e5318d4b665b57085409d4ee30c276610c98a93",
+  "model": "MobileCLIP2-B",
+  "reference_count": 45,
+  "embedding_dimensions": 512,
+  "class_counts": {
+    "ibuprofen": 20,
+    "watermelon_frost": 12,
+    "montmorillonite_powder": 7,
+    "antiviral_oral_solution": 6
+  },
+  "sources": {
+    "mobileclip2": "https://huggingface.co/apple/MobileCLIP2-B",
+    "dino": "https://huggingface.co/IDEA-Research/grounding-dino-tiny"
+  },
+  "assets": [
+    {
+      "name": "mobileclip2-b.tar.gz",
+      "size": 557522739,
+      "sha256": "481d1278f2f964a5bc1fca4676c81267defe969ec57f1829767420b53679d49c",
+      "url": "https://github.com/zombie11135/ARMCODE_AGENT_FRANKA/releases/download/observe-assets-20261022/mobileclip2-b.tar.gz"
+    },
+    {
+      "name": "grounding-dino-tiny.tar.gz",
+      "size": 640720577,
+      "sha256": "8160e1b1e3adca8c14855838e202915c64beef9b925f166e20b3921bf6f4cd33",
+      "url": "https://github.com/zombie11135/ARMCODE_AGENT_FRANKA/releases/download/observe-assets-20261022/grounding-dino-tiny.tar.gz"
+    },
+    {
+      "name": "mobileclip2-gallery.tar.gz",
+      "size": 101440,
+      "sha256": "2f95d14632eb33c526f65cdbf31de43fd2e08f310641c84267abb04af6411b5d",
+      "url": "https://github.com/zombie11135/ARMCODE_AGENT_FRANKA/releases/download/observe-assets-20261022/mobileclip2-gallery.tar.gz"
+    }
+  ],
+  "files": {
+    "models/mobileclip2-b/LICENSE": {
+      "size": 5816,
+      "sha256": "30c59d255d2b4075ba11b81ce5aa0109c28d28138d66d52f7f5d8cbba814df8b"
+    },
+    "models/mobileclip2-b/README.md": {
+      "size": 6762,
+      "sha256": "c57ba065633de3cba47a6631534e1aa56e99402510837169c8ab08827c702c52"
+    },
+    "models/mobileclip2-b/config.json": {
+      "size": 483,
+      "sha256": "00e8e240741464c9776c3179b257f0c260bcd1ca7abf2aa788fae5db0a9e3d8c"
+    },
+    "models/mobileclip2-b/mobileclip2_b.pt": {
+      "size": 599216287,
+      "sha256": "144b1344f5f01f08af8be1077f0db5eec95bf0fd1e349c1e9ca6102724448486"
+    },
+    "models/mobileclip2-b/NOTICE": {
+      "size": 258,
+      "sha256": "9574fa72c37f292a454064f699e45605453e6b856ccdd11a3289623dae14dae1"
+    },
+    "models/grounding-dino-tiny/README.md": {
+      "size": 2580,
+      "sha256": "cf46f74c7b6850f1d5cbe406028324d8798148726016d46a69a365b4a2d3e89f"
+    },
+    "models/grounding-dino-tiny/config.json": {
+      "size": 1644,
+      "sha256": "eec82c5ab66e16df12a9a212e68ac011779927c2536cf9078658e35d85f0c67a"
+    },
+    "models/grounding-dino-tiny/model.safetensors": {
+      "size": 689359096,
+      "sha256": "1a2412ef99bd74bcd3c2a246fa1e48581f8889a1300c9051974741314fc042f3"
+    },
+    "models/grounding-dino-tiny/preprocessor_config.json": {
+      "size": 457,
+      "sha256": "8454179ba95e2ad22947835aad7b45862a601fc0055ab88bf1ee70892d3aea60"
+    },
+    "models/grounding-dino-tiny/special_tokens_map.json": {
+      "size": 125,
+      "sha256": "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3"
+    },
+    "models/grounding-dino-tiny/tokenizer.json": {
+      "size": 711396,
+      "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    },
+    "models/grounding-dino-tiny/tokenizer_config.json": {
+      "size": 1237,
+      "sha256": "d40ab645b68211910b9170d22433d43186a6ec8ee6fd10ba170524b25bf4fb56"
+    },
+    "models/grounding-dino-tiny/vocab.txt": {
+      "size": 231508,
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    },
+    "models/grounding-dino-tiny/LICENSE": {
+      "size": 11355,
+      "sha256": "b403c98ec1ffaccb0124632592a3d99642cddc3031ca412b402568e6c06c202a"
+    },
+    "data/object_gallery/vector_libraries/mobileclip2_b/index.npz": {
+      "size": 92807,
+      "sha256": "b69c75cc99d448b95641105ddec724b357fbdbdb87b467a6445ade3027dc5886"
+    },
+    "data/object_gallery/vector_libraries/mobileclip2_b/metadata.json": {
+      "size": 27620,
+      "sha256": "3befa474e7a2e1b87e5498c7560aae31bd979af96dda4f0feca0d2c984435d5f"
+    }
+  }
+}

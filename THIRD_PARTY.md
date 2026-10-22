@@ -16,6 +16,9 @@
 | AnyPlace | 数据准备、几何与推理适配 | 官方源码、权重和独立环境；见 `anyplace_real/README.md` |
 | FR3 / Robotiq / RealSense | 硬件接口、坐标变换和工具 | 外部 ROS / MoveIt 工作区、串口及相机依赖、设备和本机标定 |
 
+当前观测流程的 MobileCLIP2-B、GroundingDINO 权重及预建特征库通过 Release 附件分发，
+下载、校验和许可证说明见 [观测资源包](docs/observe_assets.md)。
+
 [AnyGrasp 官方授权流程](https://github.com/graspnet/anygrasp_sdk/blob/main/license_registration/README.md)
 要求按其流程申请授权。不要提交 `licenseCfg.json`、`.public_key`、`.signature` 或 `.lic`。
 [SAM3 官方安装说明](https://github.com/facebookresearch/sam3/blob/main/README.md)

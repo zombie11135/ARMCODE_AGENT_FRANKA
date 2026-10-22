@@ -106,6 +106,7 @@
 
 五、本机配置及复现
 
+  权重与特征库的 Release 附件、下载校验及解压说明：docs/observe_assets.md。
   正式权重：models/mobileclip2-b/mobileclip2_b.pt
   权重 SHA256：144b1344f5f01f08af8be1077f0db5eec95bf0fd1e349c1e9ca6102724448486
   预建库：data/object_gallery/vector_libraries/mobileclip2_b/index.npz
