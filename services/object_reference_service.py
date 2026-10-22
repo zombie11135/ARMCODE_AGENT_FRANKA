@@ -25,6 +25,7 @@ import yaml
 from runtime.perception_pipeline import serialized_resource
 
 from .object_names import legacy_object_id, normalize_name
+from .reference_encoder import ENCODER_REVISIONS, MOBILECLIP2_PREPROCESSING, build_reference_encoder
 
 REFERENCE_VIEWPOINTS = ("front", "side", "back", "top", "bottom", "oblique", "unspecified")
 
@@ -41,6 +42,12 @@ class ReferenceSettings:
     batch_size: int = 16
     cache_frames: int = 8
     log_dir: str = ""
+    # Old YAML files retain their original behavior. The shipped example/local
+    # configuration explicitly selects MobileCLIP2 and reference_only.
+    encoder_model: str = "mobileclip_blt"
+    recognition_policy: str = "reference_then_ocr"
+    medicine_detector_prompt: str = "medicine_box"
+    vector_library_dir: str = ""
 
 
 def load_settings(path):
@@ -57,12 +64,21 @@ def load_settings(path):
             raise ValueError(f"{key} must be a positive integer")
     if type(settings.enabled) is not bool:
         raise ValueError("enabled must be boolean")
+    if settings.encoder_model not in ENCODER_REVISIONS:
+        raise ValueError(f"Unknown encoder_model: {settings.encoder_model}")
+    if settings.recognition_policy not in ("reference_only", "reference_then_ocr"):
+        raise ValueError(f"Unknown recognition_policy: {settings.recognition_policy}")
+    if not isinstance(settings.medicine_detector_prompt, str) or not settings.medicine_detector_prompt.strip():
+        raise ValueError("medicine_detector_prompt must be a nonempty string")
     raw = asdict(settings)
     for key in ("gallery_dir", "checkpoint", "log_dir"):
         if not raw[key]:
             raise ValueError(f"{key} is required")
         p = Path(raw[key]).expanduser()
         raw[key] = str((p if p.is_absolute() else path.parent / p).resolve())
+    if raw["vector_library_dir"]:
+        p = Path(raw["vector_library_dir"]).expanduser()
+        raw["vector_library_dir"] = str((p if p.is_absolute() else path.parent / p).resolve())
     return ReferenceSettings(**raw)
 
 
@@ -278,8 +294,8 @@ class ObjectReferenceService:
 
     def _encode(self, images):
         if self._encoder is None:
-            from perception_v2.retrieval import MobileCLIPGallery
-            self._encoder = MobileCLIPGallery(Path(self.settings.checkpoint), self.settings.device)
+            self._encoder = build_reference_encoder(self.settings.encoder_model,
+                                                     self.settings.checkpoint, self.settings.device)
         values = np.asarray(self._encoder.encode(images, batch_size=self.settings.batch_size), dtype=np.float32)
         if values.ndim != 2 or len(values) != len(images) or not np.isfinite(values).all():
             raise ValueError("Invalid image embeddings")
@@ -287,6 +303,43 @@ class ObjectReferenceService:
         if np.any(norm < 1e-8):
             raise ValueError("Zero image embedding")
         return values / norm
+
+    def _prepared_features(self, data):
+        """Import the evaluated bank by stable identity and image hash, not row order.
+
+        Missing/outdated banks are rebuilt from gallery images. Corrupt or
+        incompatible banks are rejected instead of mixing two 512D spaces.
+        """
+        if not self.settings.vector_library_dir:
+            return None
+        directory = Path(self.settings.vector_library_dir)
+        meta_path, index_path = directory / "metadata.json", directory / "index.npz"
+        if not meta_path.is_file() or not index_path.is_file():
+            return None
+        meta = json.loads(meta_path.read_text())
+        if meta.get("model_key") != self.settings.encoder_model:
+            raise ValueError("Prepared vector bank uses a different encoder_model")
+        if meta.get("checkpoint_sha256") != image_digest(self.settings.checkpoint):
+            raise ValueError("Prepared vector bank checkpoint hash mismatch")
+        if self.settings.encoder_model == "mobileclip2_b" and meta.get("preprocessing") != MOBILECLIP2_PREPROCESSING:
+            raise ValueError("Prepared vector bank preprocessing mismatch")
+        if meta.get("index_sha256") != image_digest(index_path):
+            raise ValueError("Prepared vector bank file hash mismatch")
+        rows = meta["references"]
+        lookup = {(r["object_id"], r["sha256"]): i for i, r in enumerate(rows)}
+        requested = [(obj["object_id"], r["sha256"]) for obj in data["objects"] for r in obj.get("references", [])]
+        if len(lookup) != len(rows):
+            raise ValueError("Prepared vector bank contains duplicate identity/image rows")
+        if any(key not in lookup for key in requested):
+            return None  # New registered photos require a new gallery cache.
+        with np.load(index_path, allow_pickle=False) as bank:
+            features = bank["features"]
+            if (features.shape != (len(rows), 512) or not np.isfinite(features).all()
+                    or not np.allclose(np.linalg.norm(features, axis=1), 1, atol=1e-4)
+                    or bank["object_ids"].tolist() != [r["object_id"] for r in rows]
+                    or bank["image_sha256"].tolist() != [r["sha256"] for r in rows]):
+                raise ValueError("Invalid prepared reference vectors or row metadata")
+            return features[[lookup[key] for key in requested]].astype(np.float32)
 
     def _load_features(self):
         data = self.gallery.read()
@@ -302,25 +355,31 @@ class ObjectReferenceService:
         # Names/aliases/brands do not change image embeddings; refresh their metadata separately.
         self._refs = refs
         key = hashlib.sha256(json.dumps([signatures, str(checkpoint), stat.st_size,
-            stat.st_mtime_ns, "mobileclip_b_rgb_crop_v1"], sort_keys=True).encode()).hexdigest()
+            stat.st_mtime_ns, ENCODER_REVISIONS[self.settings.encoder_model]], sort_keys=True).encode()).hexdigest()
         if key == self._feature_key:
             return "memory"
         path = self.gallery.directory / "features" / f"{key}.npz"
         hit = False
+        origin = "built"
         if path.exists():
             with np.load(path, allow_pickle=False) as cached:
                 features = cached["features"]
             hit = (features.ndim == 2 and len(features) == len(refs) and np.isfinite(features).all()
                    and np.allclose(np.linalg.norm(features, axis=1), 1, atol=1e-4))
         if not hit:
-            images = []
             for _, ref in refs:
                 p = self.gallery.directory / ref["path"]
                 if image_digest(p) != ref["sha256"]:
                     raise ValueError(f"Reference image changed: {p}")
-                with Image.open(p) as im:
-                    images.append(im.convert("RGB"))
-            features = self._encode(images)
+            features = self._prepared_features(data)
+            if features is not None:
+                origin = "prepared"
+            else:
+                images = []
+                for _, ref in refs:
+                    with Image.open(self.gallery.directory / ref["path"]) as im:
+                        images.append(im.convert("RGB"))
+                features = self._encode(images)
             path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".npz")
             try:
@@ -331,7 +390,7 @@ class ObjectReferenceService:
                 if os.path.exists(tmp): os.unlink(tmp)
         self._features, self._refs, self._feature_key = features, refs, key
         self._frame_features.clear()
-        return "disk" if hit else "built"
+        return "disk" if hit else origin
 
     @serialized_resource('gpu')
     def match(self, *, image_path, candidates, query, exclude_groups=()):
@@ -381,6 +440,7 @@ class ObjectReferenceService:
                 selected_index=chosen["index"] if chosen else None,
                 ranked_candidates=rows, min_similarity=self.settings.min_similarity,
                 min_class_margin=self.settings.min_class_margin, score_kind="cosine_similarity_not_probability",
+                encoder_model=self.settings.encoder_model,
                 gallery_revision=self._feature_key, image_sha256=source_hash,
                 gallery_cache=gallery_cache, frame_features_cache_hit=frame_hit,
                 elapsed_s=time.perf_counter()-started)

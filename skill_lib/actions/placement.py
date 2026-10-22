@@ -18,14 +18,15 @@ if TYPE_CHECKING:
 
 @invalidate_after_manipulation('place')
 def place(robot: SimpleRobotActions, container: str) -> SkillResult:
+    cfg = robot.config
     spec = parse_container_spec(container)
     key = container_key(spec)
     if key not in robot.place_plans:
-        result = robot.observe_container(container)
+        result = (robot._observe_container_action(container) if cfg.enable_geometry_occlusion
+                  else robot.observe_container(container))
         if not result.success:
             return result
 
-    cfg = robot.config
     plan = robot._offset_place_plan(robot.place_plans[key], robot.place_counts.get(key, 0))
     robot.place_counts[key] = robot.place_counts.get(key, 0) + 1
 

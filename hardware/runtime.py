@@ -117,16 +117,19 @@ def require_task_geometry(config):
             FrankaMoveItArm(cfg.arm).set_speed_scaling(speed)
 
 
-def camera_service(path, capture_dir):
+def camera_service(path, capture_dir, *, fixed_auxiliary=False):
     from services.realsense_dual_camera_service import CameraConfig, RealSenseDualCameraService
     from services.runtime_service_cache import get_or_create_service
 
     profile = load_config(path)
+    if fixed_auxiliary:
+        profile = replace(profile, cameras=replace(profile.cameras, mode='dual'))
     cfg = profile.cameras
     params = {**asdict(cfg), "capture_dir": str(capture_dir), "profile": str(path),
               "observation_cache": asdict(profile.observation_cache),
               "arm_profile": asdict(profile.arm), "perception": asdict(profile.perception),
-              "calibration": Path(profile.calibration_file).read_text() if profile.calibration_file else None}
+              "calibration": Path(profile.calibration_file).read_text() if profile.calibration_file else None,
+              "fixed_auxiliary": fixed_auxiliary}
 
     def create():
         def camera(name, serial, depth):
@@ -136,7 +139,7 @@ def camera_service(path, capture_dir):
                                 depth_height=cfg.height, depth_fps=cfg.fps)
         from .agent_camera import CalibratedCamera
         camera_device = RealSenseDualCameraService(
-            global_config=camera("global", cfg.global_serial, False),
+            global_config=camera("global", cfg.global_serial, fixed_auxiliary),
             wrist_config=camera("wrist", cfg.wrist_serial, True),
             save_dir=capture_dir, show_window=cfg.show_window,
             active_cameras=('wrist',) if cfg.mode == 'wrist' else ('global', 'wrist'))

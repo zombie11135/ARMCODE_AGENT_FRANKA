@@ -35,6 +35,8 @@ def build_camera(config):
     """Return an unstarted camera service and the parameters used to cache it."""
     if getattr(config, "hardware_config_path", None):
         from hardware.runtime import camera_service
+        if getattr(config, 'enable_geometry_occlusion', False) and getattr(config, 'geometry_occlusion_auxiliary', True):
+            return camera_service(config.hardware_config_path, config.capture_dir, fixed_auxiliary=True)
         return camera_service(config.hardware_config_path, config.capture_dir)
     from services.realsense_dual_camera_service import CameraConfig, RealSenseDualCameraService
     from services.runtime_service_cache import get_or_create_service
@@ -125,6 +127,24 @@ def build_execution_context(config, *, camera, event_callback=None):
             segmenter=build_segmenter(config),
             event_callback=event_callback,
             perception_workers=workers,
+            occlusion=build_occlusion_service(config),
         ),
         camera,
     )
+
+
+def build_occlusion_service(config):
+    if not getattr(config, 'enable_geometry_occlusion', False):
+        return None
+    from pathlib import Path
+    from services.wrist_occlusion_service import WristOcclusionService
+    from services.runtime_service_cache import get_or_create_service
+    checkpoint = getattr(config, 'geometry_occlusion_checkpoint', '')
+    if not checkpoint and getattr(config, 'hardware_config_path', None):
+        from hardware.config import load_config
+        checkpoint = str(Path(load_config(config.hardware_config_path).perception.sam3_model_dir)/'sam3.pt')
+    if not checkpoint:
+        raise ValueError('Geometry occlusion requires a SAM3 checkpoint')
+    params = dict(checkpoint=checkpoint, device=config.detector_device,
+                  output_dir=str(Path(config.capture_dir)/'occlusion_graph'))
+    return get_or_create_service('wrist_occlusion_graph', params, lambda: WristOcclusionService(**params))

@@ -159,3 +159,7 @@ class SimpleAgentSystemConfig:
     arm_speed_scaling: Optional[float] = None
     use_sam_for_grasp: bool = False
     target_name_bindings: Dict[str, str] = field(default_factory=dict)
+    enable_geometry_occlusion: bool = False
+    geometry_occlusion_checkpoint: str = ""
+    geometry_occlusion_auxiliary: bool = True
+    geometry_occlusion_buffer_poses_mmrad: List[List[float]] = field(default_factory=list)

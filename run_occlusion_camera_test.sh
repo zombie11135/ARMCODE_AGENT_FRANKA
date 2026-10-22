@@ -15,7 +15,8 @@ case "$TEST_COMMAND" in
   capture) exec "$TEST_PYTHON" -u -m occlusion_reasoning.camera_only "$@" ;;
   capture-base) exec "$TEST_PYTHON" -u -m occlusion_reasoning.robot_pair "$@" ;;
   dual-view) exec "$TEST_PYTHON" -u -m occlusion_reasoning.robot_pair --analyze "$@" ;;
+  primary-aux) exec "$TEST_PYTHON" -u -m occlusion_reasoning.real_primary_aux "$@" ;;
   analyze) exec "$TEST_PYTHON" -u -m occlusion_reasoning.real_single_view "$@" ;;
   fuse) exec "$TEST_PYTHON" -u -m occlusion_reasoning.real_fusion "$@" ;;
-  *) printf 'Usage: bash run_occlusion_camera_test.sh {capture|capture-base|dual-view|analyze|fuse} [options]\n' >&2; exit 2 ;;
+  *) printf 'Usage: bash run_occlusion_camera_test.sh {capture|capture-base|dual-view|primary-aux|analyze|fuse} [options]\n' >&2; exit 2 ;;
 esac

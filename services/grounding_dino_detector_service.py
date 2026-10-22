@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 from runtime.perception_pipeline import serialized_resource
+from services.detection_prompts import MEDICINE_BOX_PHRASES
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
@@ -11,14 +12,7 @@ from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
 TARGET_PRESETS = {
     # 药盒：不要写 pill box / box / package 这种太泛的词
-    "medicine_box": [
-        "rectangular medicine carton",
-        "pharmaceutical paper box",
-        "medicine package with printed text",
-        "drug package box",
-        "medicine bag",
-        "medicine package"
-    ],
+    "medicine_box": list(MEDICINE_BOX_PHRASES),
 
     # 水果：水果通常比较好检测
     "fruit": [

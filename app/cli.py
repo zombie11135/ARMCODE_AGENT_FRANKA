@@ -382,6 +382,10 @@ def build_config(args, goal: str, executor_args):
             vlm_occlusion_max_tokens=args.vlm_occlusion_max_tokens,
             vlm_occlusion_temperature=args.vlm_occlusion_temperature,
             enable_occlusion_recovery=args.enable_occlusion_recovery,
+            enable_geometry_occlusion=getattr(args, 'enable_geometry_occlusion', False),
+            geometry_occlusion_checkpoint=getattr(args, 'geometry_occlusion_checkpoint', ''),
+            geometry_occlusion_auxiliary=not getattr(args, 'disable_geometry_occlusion_auxiliary', False),
+            geometry_occlusion_buffer_poses_mmrad=getattr(args, 'geometry_occlusion_buffer_pose_mmrad', []),
             occlusion_recovery_max_attempts=args.occlusion_recovery_max_attempts,
             occlusion_buffer_pose_mmrad=args.occlusion_buffer_pose_mmrad,
             occlusion_buffer_approach_clearance_mm=args.occlusion_buffer_approach_clearance_mm,
@@ -885,6 +889,12 @@ def main():
         help="Gate 检测到目标遮挡后，自动抓取遮挡物并搬到固定 buffer，再重新观察目标。",
     )
     parser.add_argument("--occlusion_recovery_max_attempts", type=int, default=1)
+    parser.add_argument('--enable_geometry_occlusion', action='store_true',
+                        help='接入腕部主/固定辅助的 RGB-D 关系图，在目标抓取前执行有界清障与重观测循环')
+    parser.add_argument('--geometry_occlusion_checkpoint', default='', help='SAM3 sam3.pt，默认采用硬件配置目录')
+    parser.add_argument('--disable_geometry_occlusion_auxiliary', action='store_true', help='只启用腕部关系图')
+    parser.add_argument('--geometry_occlusion_buffer_pose_mmrad', type=float, nargs=6, action='append', default=[],
+                        metavar='VALUE', help='一个已检查的空闲缓冲位姿 X Y Z RX RY RZ（毫米/弧度）；可重复提供独立槽位')
     parser.add_argument(
         "--occlusion_buffer_pose_mmrad",
         type=float,

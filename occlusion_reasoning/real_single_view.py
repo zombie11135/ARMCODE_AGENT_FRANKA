@@ -151,6 +151,8 @@ def main():
     from perception_v2.proposal_refinement import DEFAULT_OCCLUSION_PROMPTS
     parser.add_argument("--prompts", nargs="+", default=list(DEFAULT_OCCLUSION_PROMPTS))
     parser.add_argument("--proposal-mode", choices=["multiscale", "full"], default="multiscale")
+    parser.add_argument('--cameras', nargs='+', choices=['wrist', 'global'],
+                        help='Analyze only these views, in the requested order')
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=False)
     from perception_v2.sam3_proposals import SAM3Proposals
@@ -165,6 +167,10 @@ def main():
     cameras = tuple(capture_report['cameras'])
     if not cameras or not set(cameras) <= {'global', 'wrist'}:
         raise ValueError('capture report must list wrist/global camera snapshots')
+    if args.cameras:
+        if len(set(args.cameras)) != len(args.cameras) or not set(args.cameras) <= set(cameras):
+            raise ValueError('requested cameras must be distinct and available in this capture')
+        cameras = tuple(args.cameras)
     for camera in cameras:
         snapshot = args.capture_dir / camera
         color = cv2.imread(str(snapshot / "color.png"))

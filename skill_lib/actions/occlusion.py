@@ -34,6 +34,8 @@ def _should_run_occlusion_recovery(
     failed_conditions: List[str],
     require_occlusion: bool = True,
 ) -> bool:
+    if robot.config.enable_geometry_occlusion:
+        return False  # The graph controller owns recovery; never fall back to unrelated detector boxes.
     if action.op != "grasp":
         return False
     if require_occlusion and "target_occluded" not in failed_conditions:
@@ -170,6 +172,7 @@ def _invoke_clear_occlusion_skill(robot: SimpleRobotActions, target: str) -> Ski
     return ClearOcclusionToBufferSkill(robot.context).run(
         target_name=display_name(robot.context, target),
         observation=observation,
+        blocker_evidence=observation.get('geometry_blocker') if cfg.enable_geometry_occlusion else None,
         execute=cfg.execute,
         capture_dir=cfg.occlusion_recovery_capture_dir,
         xarm_ip=cfg.xarm_ip,

@@ -54,6 +54,15 @@ def build_scene_memory_from_simple_robot(
         )
         objects[state.object_id] = state
 
+    if gripper_holding and gripper_holding not in objects:
+        # Execution progress survives image invalidation. This node records the
+        # executor's holding state, without restoring an old bbox, pose or score.
+        objects[gripper_holding] = ObjectState(
+            object_id=gripper_holding, name=gripper_holding, object_type='object',
+            visible=False, detector_confidence=0., ocr_text=None, ocr_match_score=0.,
+            vlm_match_score=0., reachable=False, graspable=False, occlusion_level=0.,
+            in_gripper=True, free_space=False, placeable=False, identity_source='execution_state')
+
     return SceneMemory(
         objects=objects,
         probe_counts=dict(probe_counts or {}),

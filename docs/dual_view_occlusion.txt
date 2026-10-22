@@ -1,6 +1,12 @@
 固定相机与腕部相机的遮挡证据融合设计
 日期：2026-10-21
 
+2026-10-22 当前真机实验入口已改为“腕部主、固定辅助”：
+  bash run_occlusion_camera_test.sh primary-aux
+详见 docs/wrist_primary_occlusion.txt。
+该入口独立解释两个视角，不使用跨视角几何、不合并跨视角物体身份。
+下文的 dual-view 几何融合入口保留用于研究诊断，不是当前实验默认方案。
+
 一、当前输入检查
 
 用户提供：runs/eye_to_hand/20261021-201359-b2979e/result.json。

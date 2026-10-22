@@ -1,11 +1,18 @@
-# Optional object gallery. Copy to references.yaml and configure locally.
-enabled: false
+# Copy to references.yaml after preparing the gallery and local weights.
+enabled: true
 gallery_dir: ../../data/object_gallery
-checkpoint: /absolute/path/to/mobileclip_blt.pt
+checkpoint: ../../models/mobileclip2-b/mobileclip2_b.pt
+encoder_model: mobileclip2_b
+# Reject uncertain/unregistered targets without automatically calling OCR.
+# reference_then_ocr restores the old automatic fallback behavior.
+recognition_policy: reference_only
+medicine_detector_prompt: medicine_box
+vector_library_dir: ../../data/object_gallery/vector_libraries/mobileclip2_b
 device: cuda:0
-min_similarity: 0.86
-min_class_margin: 0.05
-top_k_refs: 3
+# Exploratory wrist-photo thresholds, not independently calibrated probabilities.
+min_similarity: 0.80
+min_class_margin: 0.02
+top_k_references: 3
 batch_size: 16
 cache_frames: 8
-log_path: ../../runs/reference_recognition
+log_dir: ../../runs/reference_recognition

@@ -32,6 +32,15 @@ def gate_before_action(
     also recorded by the gate experience logger (never raises).
     """
 
+    if action.op == 'grasp' and robot.config.enable_geometry_occlusion:
+        if current_holding:
+            return SkillResult(False, dict(failure_type='geometry_gripper_not_empty', automatic_replan=False),
+                               error='夹持其他物体时不能清障或再次抓取。')
+        from .geometry_occlusion import prepare_grasp
+        geometry_result = prepare_grasp(robot, action.target)
+        if not geometry_result.success:
+            return geometry_result
+
     if not robot.config.enable_nesyro_gate:
         return SkillResult(
             success=True,
@@ -48,6 +57,13 @@ def gate_before_action(
             },
             error=f"NeSyRo Gate blocked place({action.target}): gripper is not holding an object.",
         )
+
+    if (action.op == 'place' and robot.config.enable_geometry_occlusion
+            and not robot._has_cached_observation(action.target)):
+        container_result = robot._run_gate_probe(action=action, current_holding=current_holding,
+            suggested_probe='observe_container', reason='scene mutation invalidated the container plan')
+        if not container_result.success:
+            return container_result
 
     if action.op == "grasp" and not robot._has_cached_observation(action.target):
         probe_result = robot._run_gate_probe(

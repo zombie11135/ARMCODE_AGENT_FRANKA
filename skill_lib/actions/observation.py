@@ -134,6 +134,9 @@ def _observe_medicine_action(robot: SimpleRobotActions, obj: str) -> SkillResult
 
 @reuse_observation('medicine')
 def _observe_medicine_once(robot: SimpleRobotActions, obj: str) -> SkillResult:
+    if robot.config.enable_geometry_occlusion:
+        from .geometry_occlusion import observe_geometry
+        return observe_geometry(robot, obj)
     from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
 
     cfg = robot.config
