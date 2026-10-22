@@ -1,0 +1,6 @@
+GitHub 提交测试
+
+用途：验证本地仓库能够创建提交并推送到 GitHub。
+目标分支：feat/occlusion-observation-scheduling
+
+此文件仅用于验证提交与推送流程，不参与项目运行。
