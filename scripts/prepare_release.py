@@ -25,6 +25,7 @@ ROOT_FILES = {
     "NOTICE", "main_agent.py", "test_xarm.py", "RELEASE_MANIFEST.json",
     "run_fr3_agent.sh", "run_anygrasp_offline.sh", "run_gsnet_pick.sh",
     "view_gsnet_o3d.sh", "register_object_photos.sh",
+    "capture_wrist_photos.sh",
     "run_robocasa_scene.sh", "run_occlusion_camera_test.sh",
     "calibrate_overhead_camera.sh", "test_aruco_pose.sh",
 }
@@ -63,7 +64,7 @@ def allowed(relative):
     if gallery:
         if relative.as_posix() == "data/object_gallery/gallery.json":
             return True
-        if len(relative.parts) == 4 and relative.parts[2] == "images":
+        if len(relative.parts) == 4 and relative.parts[2] in {"images", "raw_images"}:
             return relative.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}
         return (len(relative.parts) == 5 and relative.parts[2] == "captures"
                 and name in {"color.png", "capture.json"})

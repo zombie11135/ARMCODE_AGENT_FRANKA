@@ -1,5 +1,21 @@
 腕部相机图片录入工具
 
+只保存原始照片（终端 Enter 拍照）
+  cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
+  bash capture_wrist_photos.sh
+
+  相机就绪后，在终端直接按 Enter 保存一张原始彩色图；输入 q 后按 Enter 退出。
+  Ctrl+C 或终端输入结束也会关闭采集线程并释放相机。
+  默认保存到 data/object_gallery/raw_images/wrist_日期_时间_微秒.png。
+  每次按 Enter 等待一帧新图，保存完整分辨率的无损 PNG，不裁剪、不叠加标记。
+  该入口使用硬件配置中的腕部相机序列号，只开启 RGB 流，不加载识别模型或连接机械臂。
+  拍摄前先关闭其他占用腕部相机的程序。
+  原图不会自动登记进 gallery.json；raw_images/ 已允许通过 git add、commit、push 上传 GitHub。
+  保存照片只会写入本机目录，需要提交并推送后其他协作者才能获取。
+  自定义保存目录：bash capture_wrist_photos.sh --output-dir /实际图片目录
+  指定相机配置：bash capture_wrist_photos.sh --hardware-config /实际配置.yaml
+  启动脚本沿用 config/local.env 中的 ARM_AGENT_PYTHON，未配置时使用 FR3_AGENT_PYTHON 或 python3。
+
 启动
   cd "/home/seur/data/wpy/armcode-agent (1)/armcode-agent"
   bash register_object_photos.sh

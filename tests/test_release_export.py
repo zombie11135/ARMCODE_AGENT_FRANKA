@@ -39,7 +39,8 @@ def test_export_includes_robocasa_and_occlusion_entry_points(tmp_path):
                'run_occlusion_camera_test.sh', 'calibrate_overhead_camera.sh',
                'test_aruco_pose.sh', 'hardware/aruco_pose.py',
                'hardware/eye_to_hand.py', 'hardware/eye_to_hand_capture.py',
-               'hardware/eye_to_hand_ros_worker.py', 'occlusion_reasoning/robot_pair.py')
+               'hardware/eye_to_hand_ros_worker.py', 'occlusion_reasoning/robot_pair.py',
+               'capture_wrist_photos.sh', 'hardware/wrist_raw_capture.py')
     for name in sources:
         write(root, name)
     write(root, 'robocasa_occlusion/__pycache__/environment.pyc')
@@ -81,6 +82,7 @@ def test_export_includes_gallery_assets_without_caches_or_other_data(tmp_path):
     assets = ("data/object_gallery/gallery.json",
               "data/object_gallery/images/reference.png",
               "data/object_gallery/images/reference.jpg",
+              "data/object_gallery/raw_images/wrist_original.png",
               "data/object_gallery/captures/sample/color.png",
               "data/object_gallery/captures/sample/capture.json")
     for name in assets:
@@ -89,6 +91,8 @@ def test_export_includes_gallery_assets_without_caches_or_other_data(tmp_path):
             path.write_bytes(b"\x89PNG\r\n\x1a\n\xff")
     excluded = ("data/other/private.json", "data/object_gallery/.lock",
                 "data/object_gallery/features/cache.npz",
+                "data/object_gallery/raw_images/cache.npz",
+                "data/object_gallery/raw_images/private.json",
                 "data/object_gallery/images/private.json",
                 "data/object_gallery/captures/sample/depth.npz",
                 "data/object_gallery/captures/sample/.env",

@@ -26,6 +26,7 @@ TESTS = (
     "test_perception_pipeline.py",
     "test_reference_recognition.py",
     "test_reference_capture.py",
+    "test_wrist_raw_capture.py",
     "test_occlusion_camera_only.py",
     "test_occlusion_multiview.py",
     "test_occlusion_observation.py",

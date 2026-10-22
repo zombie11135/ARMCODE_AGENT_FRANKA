@@ -15,7 +15,7 @@ python3 scripts/prepare_release.py --output /absolute/path/to/armcode-agent-sour
 不会仅导出旧的已提交版本；导出前应确认这些修改正是本次要发布的版本。
 它采用目录和类型白名单，排除 `.git`、模型、外部 SDK、授权文件、本机配置、
 图库缓存、其他实验数据和运行产物；包含 `data/object_gallery/gallery.json`、
-`images/` 参考图片和 `captures/` 采集图片及 JSON 记录，生成 `RELEASE_MANIFEST.json`（导出时文件的 SHA-256）。
+`images/` 参考图片、`raw_images/` 原始照片和 `captures/` 采集图片及 JSON 记录，生成 `RELEASE_MANIFEST.json`（导出时文件的 SHA-256）。
 匹配到常见凭据格式时会停止，提示位置但不打印凭据；模式扫描不等于完整安全审计。
 修改发布范围时同步修改导出器和回归检查。
 

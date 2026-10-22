@@ -84,5 +84,6 @@ anyplace_real/config/real_saved_xarm_snapshot.json
 !/data/object_gallery/gallery.json
 !/data/object_gallery/images/
 !/data/object_gallery/captures/
+!/data/object_gallery/raw_images/
 releases/
 dist/
