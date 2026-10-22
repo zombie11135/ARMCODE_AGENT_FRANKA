@@ -33,6 +33,18 @@ def prepare_observation(snapshot_dir, proposals):
     if np.any(np.asarray(intrinsic.get("coeffs", []), float) != 0):
         raise ValueError("rectify nonzero lens distortion before pinhole occlusion reasoning")
     camera = metadata["camera_id"]
+    transform = np.eye(4)
+    reference_frame = f"{camera}_optical_local"
+    geometry_hash = None
+    if metadata.get('geometry_file'):
+        from .robot_pair import digest, verify_snapshot
+        geometry_path = root/metadata['geometry_file']
+        geometry_hash = digest(geometry_path)
+        if geometry_hash != metadata['geometry_sha256']:
+            raise ValueError('Capture geometry changed since RGB-D capture')
+        geometry = json.loads(geometry_path.read_text())
+        transform = verify_snapshot(geometry, camera, metadata, root)
+        reference_frame = 'fr3_link0'
     instances = [InstanceEvidence(p["source_id"], p["mask"], p["bbox_xyxy"], p["confidence"])
                  for p in proposals]
     packet, arrays = build_observation(
@@ -41,16 +53,19 @@ def prepare_observation(snapshot_dir, proposals):
         instances=instances, frame_id=f"{metadata['capture_group_id']}/{camera}", query="unspecified_target",
         alignment_status="recorded_aligned", timestamp_s=metadata["capture_timestamp_s"],
         camera_id=camera, capture_group_id=metadata["capture_group_id"],
-        timestamp_domain=metadata["timestamp_domain"], reference_frame=f"{camera}_optical_local",
-        T_reference_from_camera_optical=np.eye(4))
+        timestamp_domain=metadata["timestamp_domain"], reference_frame=reference_frame,
+        T_reference_from_camera_optical=transform)
     packet["provenance"] = {
         "backend": "real_saved_rgbd_with_predicted_visible_masks",
         "snapshot_dir": str(root.resolve()),
         "rgb_sha256": hashlib.sha256((root / "color.png").read_bytes()).hexdigest(),
         "depth_sha256": hashlib.sha256((root / "depth_m.npy").read_bytes()).hexdigest(),
-        "reference_frame_scope": "camera_local_self_transform_not_external_calibration",
-        "external_camera_pose_available": False, "robot_control_initialized": False,
+        "reference_frame_scope": ("capture_time_robot_base" if geometry_hash else
+                                  "camera_local_self_transform_not_external_calibration"),
+        "geometry_sha256": geometry_hash,
+        "external_camera_pose_available": bool(geometry_hash), "robot_control_initialized": False,
         "robot_state_queried": False, "target_identity_used": False,
+        "capture_robot_state_queried": bool(metadata.get('robot_state_queried')),
     }
     return packet, arrays, color
 
@@ -110,7 +125,7 @@ def save_view(snapshot_dir, proposals, backend_report, output_dir, *, raw_propos
     canvas = cv2.copyMakeBorder(canvas, 65, 0, 0, 0, cv2.BORDER_CONSTANT)
     cv2.putText(canvas, f"{packet['frame']['camera_id']}: {len(qualities)} instance hypotheses, {len(pairs)} possible pairs",
                 (10, 24), cv2.FONT_HERSHEY_SIMPLEX, .55, (255, 255, 255), 1, cv2.LINE_AA)
-    cv2.putText(canvas, "Orange: hypotheses only | no cross-camera pose | no robot connection",
+    cv2.putText(canvas, "Orange: single-view hypotheses | cross-view inference not run",
                 (10, 49), cv2.FONT_HERSHEY_SIMPLEX, .43, (255, 255, 255), 1, cv2.LINE_AA)
     if not cv2.imwrite(str(output_dir / "evidence.png"), canvas):
         raise IOError("failed to save evidence overlay")
@@ -119,7 +134,8 @@ def save_view(snapshot_dir, proposals, backend_report, output_dir, *, raw_propos
                "candidates": named, "node_quality": qualities,
                "reasoning_seconds": reasoning_seconds, "accuracy_evaluated": False,
                "evaluation_status": "pipeline_smoke_test_no_human_occlusion_ground_truth",
-               "cross_view_inference_run": False, "external_camera_pose_used": False,
+               "cross_view_inference_run": False,
+               "external_camera_pose_used": packet['provenance']['external_camera_pose_available'],
                "robot_control_initialized": False, "robot_state_queried": False}
     (output_dir / "single_view_report.json").write_text(json.dumps(summary, indent=2, allow_nan=False))
     return summary

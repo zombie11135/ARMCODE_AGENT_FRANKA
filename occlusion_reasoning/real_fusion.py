@@ -18,6 +18,8 @@ from .extract_multiview import load_observation
 from .observations import _validate_transform
 from .scene import infer_scene
 from .relations import extract_relations
+from .multiview import MultiViewConfig, _prepare, _project
+from .planar import PlanarConfig
 
 
 def relative_pose_from_board(T_global_from_board, T_wrist_from_board):
@@ -102,31 +104,107 @@ def render_fusion(observations, result, output):
             color = (255, 0, 255) if edge["relation"] == "occludes_observed_surface" else (0, 165, 255)
             for x, y in edge.get("support_pixels_sample_xy", []):
                 cv2.circle(canvas, (x, y), 1, color, -1)
-        canvas = cv2.copyMakeBorder(canvas, 40, 0, 0, 0, cv2.BORDER_CONSTANT)
-        cv2.putText(canvas, f"{camera} | shared entity IDs; magenta: measured; orange: prior",
-                    (8, 26), cv2.FONT_HERSHEY_SIMPLEX, .37, (255, 255, 255), 1, cv2.LINE_AA)
+        canvas = cv2.copyMakeBorder(canvas, 60, 0, 0, 0, cv2.BORDER_CONSTANT)
+        cv2.putText(canvas, f"{camera} | geometry: {result['geometry_health']['status']}",
+                    (8, 23), cv2.FONT_HERSHEY_SIMPLEX, .42, (255, 255, 255), 1, cv2.LINE_AA)
+        cv2.putText(canvas, "Entity IDs | magenta: cross-view evidence; orange: local prior",
+                    (8, 46), cv2.FONT_HERSHEY_SIMPLEX, .39, (255, 255, 255), 1, cv2.LINE_AA)
         images.append(canvas)
+    height = max(im.shape[0] for im in images)
+    images = [cv2.copyMakeBorder(im, 0, height-im.shape[0], 0, 0, cv2.BORDER_CONSTANT) for im in images]
     if not cv2.imwrite(str(output), np.hstack(images)):
         raise IOError(output)
 
 
-def fuse(analysis_dir, calibration_path, output_dir):
+def render_alignment(observations, result, output_dir):
+    """Show actual projection depth discrepancies, without calling them calibration accuracy."""
+    config = MultiViewConfig(**result['config'])
+    prepared = [_prepare(packet, arrays, config) for packet, arrays in observations]
+    canvases = [cv2.imread(str(Path(packet['provenance']['snapshot_dir'])/'color.png'))
+                for packet, _ in observations]
+    rows = []
+    for s, source in enumerate(prepared):
+        destination = prepared[1-s]
+        for node, points in zip(source['nodes'], source['points']):
+            projection = _project(source, destination, points, config)
+            x, y = projection['pixels'].T
+            measured = destination['depth'][y, x]
+            valid = (projection['owner'] >= 0) & np.isfinite(measured) & (measured > 0)
+            delta = projection['delta'][valid]
+            if not len(delta):
+                continue
+            rows.append({'source_node': node['node_id'], 'destination_camera': destination['frame']['camera_id'],
+                         'tested_interior_pixels': len(delta),
+                         'depth_delta_q10_q50_q90_mm': (np.quantile(delta, [.1, .5, .9])*1000).tolist(),
+                         'in_front_inconsistent_pixels': int((delta < -config.occlusion_depth_margin_m).sum()),
+                         'meaning': 'projected_depth_minus_measured_depth_not_calibration_error_bound'})
+            for selection, color in [
+                    (projection['same'], (0, 220, 0)),
+                    (projection['behind'], (0, 165, 255)),
+                    (projection['delta'] < -config.occlusion_depth_margin_m, (0, 0, 255))]:
+                pixels = projection['pixels'][selection & valid]
+                stride = max(1, int(np.ceil(len(pixels)/2000)))
+                for u, v in pixels[::stride]:
+                    cv2.circle(canvases[1-s], (int(u), int(v)), 1, color, -1)
+    output_dir = Path(output_dir)
+    (output_dir/'alignment_report.json').write_text(json.dumps({
+        'geometry_health': result['geometry_health'], 'projections': rows,
+        'accuracy_evaluated': False,
+        'legend': {'green': 'within_same_surface_depth_tolerance',
+                   'red': 'projected_surface_in_measured_free_space',
+                   'orange': 'projected_surface_behind_measured_depth_not_necessarily_distinct_object'}
+    }, indent=2, allow_nan=False))
+    panels = []
+    for view, canvas in zip(prepared, canvases):
+        canvas = cv2.copyMakeBorder(canvas, 45, 0, 0, 0, cv2.BORDER_CONSTANT)
+        cv2.putText(canvas, view['frame']['camera_id']+' | green: agree; red: inconsistent; orange: behind',
+                    (8, 28), cv2.FONT_HERSHEY_SIMPLEX, .37, (255, 255, 255), 1)
+        panels.append(canvas)
+    height = max(p.shape[0] for p in panels)
+    panels = [cv2.copyMakeBorder(p, 0, height-p.shape[0], 0, 0, cv2.BORDER_CONSTANT) for p in panels]
+    if not cv2.imwrite(str(output_dir/'alignment.png'), np.hstack(panels)):
+        raise IOError('Could not save alignment diagnostic image')
+
+
+def fuse(analysis_dir, calibration_path, output_dir, *, config=None):
     analysis_dir, calibration_path, output_dir = map(Path, (analysis_dir, calibration_path, output_dir))
     calibration = json.loads(calibration_path.read_text())
     loaded = [load_observation(analysis_dir/c/"observation/scene_observation.json")
               for c in ("global", "wrist")]
     observations = [item[0] for item in loaded]
     serials = {}
-    for packet, _ in observations:
+    for packet, arrays in observations:
         source = Path(packet["provenance"]["snapshot_dir"])
         metadata = json.loads((source/"grasp_input.json").read_text())
         if hashlib.sha256((source/"color.png").read_bytes()).hexdigest() != packet["provenance"]["rgb_sha256"]:
             raise ValueError("saved image no longer matches its observation packet")
         if hashlib.sha256((source/"depth_m.npy").read_bytes()).hexdigest() != packet["provenance"]["depth_sha256"]:
             raise ValueError("saved depth no longer matches its observation packet")
+        if not np.array_equal(arrays['depth_m'], np.load(source/'depth_m.npy', allow_pickle=False), equal_nan=True):
+            raise ValueError('Observation depth arrays differ from the original saved RGB-D')
         serials[packet["frame"]["camera_id"]] = metadata["device_serial"]
-    bound = bind_static_pair(observations, calibration, serials)
-    result = infer_scene(bound)
+    base_bound = calibration.get('schema') == 'robot_base_capture_geometry_v1'
+    if base_bound:
+        from .robot_pair import bind_base_pair, verify_snapshot
+        geometry_hash = hashlib.sha256(calibration_path.read_bytes()).hexdigest()
+        for packet, _ in observations:
+            camera = packet['frame']['camera_id']
+            source = Path(packet['provenance']['snapshot_dir'])
+            metadata = json.loads((source/'grasp_input.json').read_text())
+            if (packet['provenance'].get('geometry_sha256') != geometry_hash
+                    or metadata.get('geometry_sha256') != geometry_hash):
+                raise ValueError('Observation and capture geometry hashes differ; reanalyze the matching capture')
+            verify_snapshot(calibration, camera, metadata, source)
+        bound = bind_base_pair(observations, calibration, serials)
+    else:
+        bound = bind_static_pair(observations, calibration, serials)
+    config = config or {}
+    multiview_options = ({'max_timestamp_delta_s': calibration['max_frame_receive_skew_s']}
+                         if base_bound else {})
+    multiview_options.update(config.get('multiview', {}))
+    result = infer_scene(bound,
+        multiview_config=MultiViewConfig(**multiview_options),
+        planar_config=PlanarConfig(**config.get('planar', {})))
     result["single_view_boundary_evidence"] = []
     for packet, arrays in bound:
         boundary = extract_relations(packet, arrays)
@@ -146,12 +224,19 @@ def fuse(analysis_dir, calibration_path, output_dir):
         "calibration": str(calibration_path.resolve()),
         "calibration_sha256": hashlib.sha256(calibration_path.read_bytes()).hexdigest(),
         "input_provenance": [item[1] for item in loaded],
-        "coordinate_reference": "global_camera_optical_not_robot_base",
+        "coordinate_reference": "fr3_link0" if base_bound else "global_camera_optical_not_robot_base",
         "camera_pair_and_scene_stationarity_assumed": True,
         "exposure_synchronization_verified": False,
         "robot_control_initialized": False, "robot_state_queried": False,
         "accuracy_evaluated": False,
     }
+    if base_bound:
+        result['real_camera_fusion'].update(
+            capture_robot_state_queried=True,
+            calibration_status={k:v['status'] for k,v in calibration['calibrations'].items()},
+            operator_verification_note=calibration.get('operator_verification_note', ''),
+            validity='this_stationary_capture_group_only',
+            robot_motion_commanded=False)
     output_dir.mkdir(parents=True, exist_ok=False)
     for packet, arrays in bound:
         directory = output_dir/packet["frame"]["camera_id"]
@@ -161,6 +246,7 @@ def fuse(analysis_dir, calibration_path, output_dir):
         np.savez_compressed(directory/"observation_arrays.npz", **arrays)
     (output_dir/"multiview_relations.json").write_text(json.dumps(result, indent=2, allow_nan=False))
     render_fusion(bound, result, output_dir/"evidence.png")
+    render_alignment(bound, result, output_dir)
     return result
 
 
@@ -169,11 +255,18 @@ def main():
     parser.add_argument("--analysis-dir", type=Path, required=True)
     parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument('--config', type=Path, help='JSON with multiview/planar parameter dictionaries')
     args = parser.parse_args()
-    result = fuse(args.analysis_dir, args.calibration, args.output_dir)
+    result = fuse(args.analysis_dir, args.calibration, args.output_dir,
+                  config=json.loads(args.config.read_text()) if args.config else None)
     print(json.dumps({"output_dir": str(args.output_dir),
                       "geometry_health": result["geometry_health"]["status"],
                       "all_relation_edges": len(result["relation_graph"]["edges"]),
+                      "accepted_cross_view_associations": sum(a['status'] == 'accepted' for a in result['associations']),
+                      "measured_cross_view_occlusion_edges": sum(e['relation'] == 'occludes_observed_surface'
+                                                                for e in result['relation_graph']['edges']),
+                      "single_view_possible_occlusion_edges": sum(e['relation'] == 'possible_occludes'
+                                                                 for e in result['relation_graph']['edges']),
                       "occlusion_evidence_edges": sum(e["relation"] in {"occludes_observed_surface", "possible_occludes"}
                                                       for e in result["relation_graph"]["edges"])}))
 

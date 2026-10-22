@@ -20,6 +20,13 @@ CUDA、机器人或相机。`requirements-dev.txt` 中的 headless OpenCV 仅用
 `skill_lab/` 与根目录 `test_xarm.py` 是实验入口。不要使用全仓库 `pytest` 作为通用验收命令。
 已验证可移植的测试由 `scripts/check_core.py` 显式列出，CI 使用同一个入口。
 
+## 观测模块开发
+
+使用共享开发分支 `feat/occlusion-observation-scheduling`，代码地图、测试范围和
+采集/融合命令见 [观测开发指南](OBSERVATION_DEVELOPMENT.md)。
+基础检查包含观测缓存、双视角几何、标定算法和模拟设备测试；实际 SAM3、
+RealSense、ROS 和模型推理按需在独立环境配置。
+
 ## 集成电脑：按需配置
 
 在独立的实机环境中安装和准备相应依赖，参照 [第三方依赖说明](../THIRD_PARTY.md)。

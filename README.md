@@ -2,10 +2,16 @@
 机械臂 Agent：从任务规划、感知和 Gate 判断，到技能执行、失败反馈与重规划。
 当前主要接入 FR3 / Robotiq，保留显式选择的旧 xArm / ROS 1 链路。
 
+## 分支与观测开发
+
+`feat/occlusion-observation-scheduling` 是共享开发分支，`main` 保留稳定版本。
+新开发从共享开发分支开始，验证稳定后通过单独的 PR 更新 `main`。
+观测模块的代码位置、离线验证和双相机入口见 [观测开发指南](docs/OBSERVATION_DEVELOPMENT.md)。
+
 ## 新成员快速开始
 
 这是源码协作基线：包含 Agent、模型适配和硬件接口，模型权重、第三方 SDK、授权、
-本机配置和采集数据由各机器单独准备。先在 Python 3.10 环境验证基础链路：
+本机配置和实验采集数据由各机器单独准备；`data/object_gallery/` 参考图库随仓库共享。先在 Python 3.10 环境验证基础链路：
 
 ```bash
 python3.10 -m venv .venv-dev

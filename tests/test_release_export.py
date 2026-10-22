@@ -36,7 +36,10 @@ def test_export_includes_robocasa_and_occlusion_entry_points(tmp_path):
     root = tmp_path / 'workspace'
     sources = ('robocasa_occlusion/environment.py', 'robocasa_occlusion/upstream.lock.json',
                'occlusion_reasoning/scene.py', 'run_robocasa_scene.sh',
-               'run_occlusion_camera_test.sh')
+               'run_occlusion_camera_test.sh', 'calibrate_overhead_camera.sh',
+               'test_aruco_pose.sh', 'hardware/aruco_pose.py',
+               'hardware/eye_to_hand.py', 'hardware/eye_to_hand_capture.py',
+               'hardware/eye_to_hand_ros_worker.py', 'occlusion_reasoning/robot_pair.py')
     for name in sources:
         write(root, name)
     write(root, 'robocasa_occlusion/__pycache__/environment.pyc')

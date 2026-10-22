@@ -1,4 +1,5 @@
 """Frame readiness and CLI cleanup without opening cameras or moving hardware."""
+import sys
 import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -9,8 +10,12 @@ import pytest
 
 @pytest.fixture
 def camera(tmp_path, monkeypatch):
+    # Startup logic is tested with a simulated SDK, even when RealSense is absent.
+    fake_rs = Mock()
+    monkeypatch.setitem(sys.modules, "pyrealsense2", fake_rs)
     from services import realsense_dual_camera_service as module
 
+    monkeypatch.setattr(module, "rs", fake_rs)
     monkeypatch.setattr(module.rs, "pipeline", Mock(side_effect=AssertionError("Hardware forbidden")))
     service = module.RealSenseDualCameraService(
         module.CameraConfig("global", serial="global-test", enable_depth=False),
@@ -162,6 +167,8 @@ def test_single_goal_closes_cached_services_on_every_exit(monkeypatch, outcome):
     monkeypatch.setattr(runtime_service_cache, "close_cached_services", cleanup)
     run = Mock(side_effect=outcome) if isinstance(outcome, BaseException) else Mock(return_value=outcome)
     monkeypatch.setattr(cli, "run_goal", run)
+    from hardware import runtime as hardware_runtime
+    monkeypatch.setattr(hardware_runtime, "apply_cli_profile", Mock())
     monkeypatch.setattr(sys, "argv", ["app", "--goal", "offline", "--close_services_on_exit"])
     if isinstance(outcome, BaseException):
         with pytest.raises(type(outcome)):

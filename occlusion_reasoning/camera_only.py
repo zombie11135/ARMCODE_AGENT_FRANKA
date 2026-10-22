@@ -32,14 +32,15 @@ def _default_service(specs, save_dir):
         active_cameras=tuple(specs))
 
 
-def _choose_pair(service, timeout_s, max_age_s, cameras=("global", "wrist")):
+def _choose_pair(service, timeout_s, max_age_s, cameras=("global", "wrist"), *, min_timestamp_s=None):
     deadline = time.monotonic() + timeout_s
     best, best_delta = None, float("inf")
     while True:
         pair = {name: service.get_latest_rgbd(name) for name in cameras}
         now = time.time()
         timestamps = [float(f["timestamp"]) for f in pair.values()]
-        if all(0 <= now-t <= max_age_s for t in timestamps):
+        if (all(0 <= now-t <= max_age_s for t in timestamps)
+                and (min_timestamp_s is None or min(timestamps) >= min_timestamp_s)):
             delta = max(timestamps)-min(timestamps)
             if delta < best_delta:
                 best, best_delta = pair, delta

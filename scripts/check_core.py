@@ -21,6 +21,21 @@ TESTS = (
     "test_vlm_occlusion_gate.py",
     "test_clear_occlusion_to_buffer.py",
     "test_legacy_gate_equivalence.py",
+    "test_camera_startup.py",
+    "test_observation_memory.py",
+    "test_perception_pipeline.py",
+    "test_reference_recognition.py",
+    "test_reference_capture.py",
+    "test_occlusion_camera_only.py",
+    "test_occlusion_multiview.py",
+    "test_occlusion_observation.py",
+    "test_occlusion_proposal_refinement.py",
+    "test_occlusion_real_fusion.py",
+    "test_occlusion_relations.py",
+    "test_occlusion_robot_pair.py",
+    "test_aruco_pose.py",
+    "test_eye_to_hand.py",
+    "test_fr3_hardware.py",
 )
 
 

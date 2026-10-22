@@ -1,17 +1,20 @@
 # 多人协作约定
 
-采用单仓库、模块分工、短任务分支和 Pull Request。`main` 保存通过离线检查的协作基线；
-本机配置、模型和数据独立管理。实机验收通过的提交打 `robot-validated-*` 标签，
-不要把所有合并到 `main` 的代码都当作已经实机验证。
+采用单仓库、模块分工和 Pull Request。
+`feat/occlusion-observation-scheduling` 是当前共享开发分支，接收观测、感知和集成更新；
+`main` 是稳定分支，开发分支通过离线检查、相关模型验证和所需实机验收后，
+再单独创建以 `main` 为目标的稳定更新 PR，不自动合并或直接推送 `main`。
+本机配置、模型、实际标定和运行数据独立管理。实机验收通过的提交打
+`robot-validated-*` 标签，并记录验证设备和范围。
 
 ## 第一次参与
 
 按 [SETUP](docs/SETUP.md) 建立 CPU 开发环境，运行 `python scripts/check_core.py`。
-随后从最新主分支开分支：
+随后从最新开发分支开个人任务分支：
 
 ```bash
-git switch main
-git pull --ff-only
+git switch feat/occlusion-observation-scheduling
+git pull --ff-only origin feat/occlusion-observation-scheduling
 git switch -c feat/your-module-your-task
 # 完成一个范围明确的任务
 python scripts/check_core.py
@@ -20,8 +23,10 @@ git commit -m "Describe the behavior change"
 git push -u origin HEAD
 ```
 
-在 GitHub 创建 PR，说明行为变化和实际验证范围，由另一位开发者评审后合并。
-多人可以同时修改不同模块；同一目录内也按任务开分支，不建立长期的个人分支或模块分支。
+在 GitHub 创建以 `feat/occlusion-observation-scheduling` 为目标的 PR，
+说明行为变化和实际验证范围，由另一位开发者评审后合并。
+经维护者协调，也可以直接将已验证的小改动推送到共享开发分支；推送前先同步远端。
+多人可以同时修改不同模块；同一目录内也按任务开个人分支，完成后合回共享开发分支。
 合并方式建议统一为 squash，便于按任务回退。
 
 ## 分工与评审
@@ -41,7 +46,8 @@ git push -u origin HEAD
 
 ## 验证按任务逐步补齐
 
-基础 CI：`python scripts/check_core.py`，无模型、无设备。
+基础 CI：`python scripts/check_core.py`，无模型、无设备；开发分支推送和 PR 均运行检查。
+观测模块入口、职责和验证边界见 [观测开发指南](docs/OBSERVATION_DEVELOPMENT.md)。
 感知/学习：在独立环境使用保存数据或合成样例，PR 记录数据标识、依赖版本和命令。
 硬件：记录 commit、设备 profile/标定版本和结果；不能验证时明确写「尚未实机验证」。
 新样例优先使用小型合成数据；`data/object_gallery/` 的清单、参考图片和采集记录

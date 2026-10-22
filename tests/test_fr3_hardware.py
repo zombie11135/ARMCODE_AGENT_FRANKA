@@ -67,6 +67,14 @@ def gripper(replies, execute=True):
 
 class OfflineTestCase(unittest.TestCase):
     def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.profile_path = Path(directory.name) / "hardware.json"
+        self.profile_path.write_text(json.dumps({"arm": {"workspace": directory.name}}))
+        for target in ("hardware.config.DEFAULT_CONFIG", "hardware.cli.DEFAULT_CONFIG"):
+            profile_patch = patch(target, self.profile_path)
+            profile_patch.start()
+            self.addCleanup(profile_patch.stop)
         # Real device configuration may change; offline tests must never open it.
         serial_guard = patch("serial.Serial", side_effect=AssertionError("Real serial access forbidden in offline tests"))
         serial_guard.start()
@@ -103,11 +111,22 @@ class ConfigAndPoseTests(OfflineTestCase):
     def test_no_legacy_transform_fallback(self):
         with self.assertRaisesRegex(RuntimeError, "xArm"):
             PendingTransforms().camera_grasp_to_flange_pose(None, "wrist", None)
-        require_task_geometry(SimpleNamespace(hardware_config_path=str(Path(__file__).resolve().parents[1] / "config/hardware/fr3.yaml")))
+        with self.assertRaises(RuntimeError):
+            require_task_geometry(SimpleNamespace(hardware_config_path=str(self.profile_path)))
         require_task_geometry(SimpleNamespace())  # Explicit old runtime remains available.
 
 
 class ArmTests(OfflineTestCase):
+    def test_pose_command_help_does_not_connect_to_robot(self):
+        for operation in ('plan', 'move'):
+            with patch('hardware.cli.FrankaMoveItArm') as robot, \
+                    patch('sys.stdout', new_callable=io.StringIO) as output:
+                with self.assertRaises(SystemExit) as stopped:
+                    main(['arm', operation, '--help'])
+                self.assertEqual(stopped.exception.code, 0)
+                self.assertIn('X Y Z RX RY RZ', output.getvalue())
+                robot.assert_not_called()
+
     @staticmethod
     def process_double(ok=True, cleanup=True, interrupt=False):
         def start(command, **kwargs):
@@ -304,7 +323,7 @@ class AgentWiringTests(OfflineTestCase):
         apply_cli_profile(args)
         self.assertTrue(args.simple_actions)
         self.assertEqual(args.xarm_ip, "")
-        self.assertEqual(args.handeye_config, load_config(DEFAULT_CONFIG).calibration_file)
+        self.assertEqual(args.handeye_config, load_config(DEFAULT_CONFIG).calibration_file or "")
         self.assertEqual(args.global_serial, "346522072096")
         self.assertFalse(args.ignore_grip_error)
 

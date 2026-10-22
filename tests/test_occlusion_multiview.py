@@ -222,6 +222,17 @@ def test_out_of_frame_is_unknown():
     result = extract_multiview(observations)
     assert all(p["unique_projected_pixels"] == 0 for p in result["projections"])
     assert not result["relation_graph"]["edges"]
+    assert result['geometry_health']['status'] == 'insufficient_evidence'
+    assert not result['geometry_health']['cross_view_inference_enabled']
+
+
+def test_insufficient_check_support_cannot_certify_otherwise_plausible_matches():
+    observations, _ = ray_box_views()
+    result = extract_multiview(observations, MultiViewConfig(min_consistency_check_pixels=100000))
+    assert result['geometry_health']['status'] == 'insufficient_evidence'
+    assert not result['relation_graph']['edges']
+    assert result['associations']
+    assert all(a['status'] == 'unverified_insufficient_geometry_support' for a in result['associations'])
 
 
 def test_zbuffer_does_not_count_multiple_source_pixels_as_independent_votes():

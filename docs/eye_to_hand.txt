@@ -1,0 +1,187 @@
+FR3 俯视相机眼在手外标定
+========================
+
+运行目录：/home/seur/data/wpy/armcode-agent (1)/armcode-agent
+Python：/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+相机：固定俯视 D435i，序列号 346522072096。只开这台的彩色流，不开腕部相机。
+默认板：DICT_4X4_50、ID=20、黑色码外边长 95 mm（用户 2026-10-22 实测更正；此前误填 100 mm）。
+尺寸不包括白边、纸张或背板；打印缩放后的实际尺寸必须一致。
+
+1. 准备
+-------
+保留已启动的 ROS real.sh；退出占用俯视相机的 Agent/预览程序。
+夹爪夹紧刚性标定板的背板或把手，不遮住 ArUco 四角和白边。
+全程保持夹持不变，相机和机器人基座固定。无需测量法兰到标定板的偏移。
+若重新夹持、板子滑动或相机被碰动，应新建一轮采样，不混用旧样本。
+
+程序只订阅 /joint_states 并请求 /compute_fk，不连接第二个 FCI 客户端，
+不启动/切换控制器，不恢复机器人，不操作夹爪，也不发送运动目标。
+机器人位姿固定为 fr3_link0 -> fr3_link8，不使用自定义 TCP 或 O_T_EE。
+你自行通过已有运动接口/示教调整位置，完全停稳后采样。
+若切换示教模式后 ROS 状态停止发布，需恢复可读取状态后再保存，不能用旧位姿。
+
+2. 启动（下面一行是完整命令）
+---------------------------
+bash calibrate_overhead_camera.sh collect --marker-length-mm 95 --marker-id 20
+
+也可以直接 bash calibrate_overhead_camera.sh，使用同样默认值。
+可选 --session-dir PATH 指定一个尚不存在的新目录。默认创建 runs/eye_to_hand/时间-唯一编号。
+硬件配置中的 cameras.mode 即使为 wrist，也不影响本程序单独选择 global_serial。
+本程序的控制台提示为中文，OpenCV 窗口提示为英文以避免中文字体方框问题。
+
+窗口有焦点时：
+  S：采集一个标定样本（约 1 秒图像 + 只读 FK），期间保持静止。
+  V：采集独立验证样本，不参与最终外参拟合。
+  U：撤销最后一条；原图和 excluded_samples 记录保留，不参与拟合。
+  C：计算外参，打印误差并保存 result.json；可继续采样后再次计算。
+  Q / Esc：退出。每个成功样本即时保存，退出不会丢失已经保存的数据。
+
+推荐先取 15–25 个 S 样本，然后在不同位置/角度取至少 3–5 个 V 样本，再按 C。
+让标记分布在视野不同位置，变化距离和高度，并绕至少两个不同轴倾斜。
+在可见、可达且不碰撞的范围内，取若干约 15–30 度的不同方向倾角；
+不要全部平放、只平移，或只绕同一轴旋转。无需、也不应强行走到极限姿态。
+图像中标记太小、重投影误差大、平面姿态歧义、机械臂或板子未静止均拒绝保存。
+没有自动移动到下一采样点的功能；抓取阶段的夹爪 keepalive 如有需要由现有程序维护。
+
+3. 输出及坐标约定
+-----------------
+samples.json：尺寸、序列号、相机内参/畸变、机器人关节、FK 位姿、角点、
+重投影误差、静止检查、接收时间和 RealSense 图像时间戳。
+每个样本一张原始彩色 PNG，按 ID 命名。
+result.json：包含两个未知外参和误差报告，所有平移均为米。
+
+  p_base = base_T_camera @ p_camera
+  base_T_flange @ flange_T_marker = base_T_camera @ camera_T_marker
+
+base_T_camera 是 fr3_link0 <- global_color_optical_frame；相机坐标为
+X 向右、Y 向下、Z 向前。camera_T_base 是其逆变换。
+flange_T_marker 是 fr3_link8 <- marker。板坐标原点在码中心，
+X 向码右、Y 向码上、Z 朝向印刷面外。
+
+程序使用 OpenCV PARK 手眼求解，传入 inverse(base_T_flange) 和 camera_T_marker，
+与腕部相机眼在手内标定的输入方向不同。
+不需要已知 flange_T_marker，也不使用当前 16 cm 抓取 TCP 偏移。
+验证比较板中心位置和板姿态的一致性；不等同于绝对抓取精度保证。
+默认质量指标：位置 RMS <= 5 mm、最大 <= 10 mm，角度 RMS <= 2°、最大 <= 3°。
+这些是标定报告的判据，与机械臂到位容差无关。
+  needs_validation：尚无足够独立验证，或验证数量不足。
+  quality_failed：误差超标或交叉验证退化，检查样本/尺寸/滑动，不直接用来运动。
+  validated：训练和至少 3 个独立验证样本达到上述判据。
+>=12 个标定样本时另做确定性留出交叉验证，每 4 个留出 1 个，不自动删除异常点。
+
+结果独立保存，不覆盖 config/calibration/fr3_handeye.yaml 中已有腕部标定，
+也不会自动修改 Agent 的相机模式或启用俯视相机抓取。
+完成后可按明确的坐标方向接入全局相机定位接口。
+
+4. 离线重算（无需相机、机器人、Docker）
+--------------------------------------
+bash calibrate_overhead_camera.sh solve "runs/eye_to_hand/你的会话目录/samples.json"
+
+可加 --output /绝对路径/result.json。输出目录必须存在，禁止覆盖原始 samples.json。
+solve 使用保存的 PnP/机器人位姿重新求解外参，不重新跑图像检测。
+若尺寸输入错误，应更正尺寸并重新采集，不能只修改 JSON 的尺寸标签。
+result.json 记录原始样本文件的 SHA256；后续增加/撤销样本后需重新按 C 或 solve。
+
+5. 常见问题
+-----------
+Device busy：关闭占用俯视相机的程序，保留 real.sh 即可。
+无新鲜机器人反馈：确认 real.sh 运行、状态广播器可用。此处不自动启动 REAL 或运动。
+FK unavailable：MoveIt /compute_fk 服务未就绪。
+姿态变化不足：增加绕不同轴的倾斜，而不是重复相同朝向。
+平面标记歧义：调整倾角、光照或距离，让两种平面姿态解可以区分。
+误差大：检查板夹持是否滑动/弯曲、输入尺寸是否为实际黑码边长、图像是否清楚。
+非零不支持的畸变模型：程序明确报错，不擅自将系数清零；需补该模型的去畸变。
+
+算法参考：
+https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html （calibrateHandEye 的 eye-to-hand 方程）
+https://dev.realsenseai.com/docs/projection-in-realsense-sdk-2-0/
+
+6. 单次/连续验证 ArUco 在基座坐标系下的位姿
+-------------------------------------------
+在项目根目录执行；只打开标定结果所绑定的固定相机，不查询 FK、不控制机械臂或夹爪。
+单次：等待有效检测后输出一次并退出，默认最长等 15 秒。
+
+  bash test_aruco_pose.sh \
+    --calibration runs/eye_to_hand/20261021-201359-b2979e_marker95mm/result.json \
+    --marker-id 20 --marker-length-mm 95
+
+连续：每 0.5 秒至多输出一条；不加 --display 可在没有桌面的终端运行。
+
+  bash test_aruco_pose.sh \
+    --calibration runs/eye_to_hand/20261021-201359-b2979e_marker95mm/result.json \
+    --marker-id 20 --marker-length-mm 95 \
+    --continuous --interval 0.5 --display
+
+Ctrl-C 或显示窗口内 q/Esc 退出；--duration 60 可限定连续模式运行 60 秒。
+默认字典 DICT_4X4_50，边长指黑色码区外边长，不包含纸张白边。
+XYZ 以毫米显示，RPY 以度显示；坐标为 fr3_link0 <- marker。
+码坐标原点在码中心，X 朝码右、Y 朝码上、Z 朝印刷面外；RPY 为固定轴 XYZ。
+显示的姿态是码坐标系的朝向，不是相机朝向或夹爪朝向。
+基座位姿 = result.base_T_camera @ 本次 PnP camera_T_marker。
+使用本次真实相机内参，不靠检测框中心的单点深度估计整个位姿。
+quality_failed / needs_validation 结果仍允许做人工核对，但会明确显示原始状态，
+不改变标定状态或既有抓取配置。
+
+保存到 runs/eye_to_hand/marker_pose_<时间>_<随机串>/：
+  session.json：外参文件 SHA256、序列号、内参、码尺寸及坐标约定。
+  poses.jsonl：每次有效/无效观测，含时间、帧号、位姿和重投影误差。
+  latest.json：最后一次观测；标记丢失/歧义时 valid=false，且没有旧 XYZ。
+  last_valid_color.png / last_valid_pose.png：最后一张有效原图/坐标轴图，
+    只代表图内时间戳对应的有效帧，不代表当前标记仍然可见。
+  summary.json：报告数量与退出时间。
+--output-dir 可以指定新目录，每次必须使用尚不存在的目录。
+相机被其他程序占用时关闭占用程序后再运行；本命令不会终止其他进程抢相机。
+
+机械臂移动请在另一个终端使用原有接口。先按原方式启动真机栈，保持其终端运行：
+
+  cd /home/seur/data/wpy/armcode_agent
+  bash scripts/real.sh start
+
+移动终端：
+
+  cd '/home/seur/data/wpy/armcode-agent (1)/armcode-agent'
+  ARM_TEST_PYTHON=/home/seur/data/wpy/conda_envs/env_armcode_agent/bin/python
+  "$ARM_TEST_PYTHON" -m hardware.cli arm pose --stack real
+  read -r -p '输入已确认的法兰目标 X Y Z RX RY RZ（米、弧度）：' -a TARGET_FLANGE
+  "$ARM_TEST_PYTHON" -m hardware.cli arm plan "${TARGET_FLANGE[@]}" --stack real
+  "$ARM_TEST_PYTHON" -m hardware.cli arm move "${TARGET_FLANGE[@]}" --stack real --execute
+
+目标是 fr3_link0 下 fr3_link8 法兰的绝对位姿，不是码中心或夹爪指尖。
+特别是不能把检测到的码中心 Z 直接填作法兰目标 Z。
+plan 只规划；move 会从当前状态重新规划并执行，不保证与前一次计划轨迹相同。
+移动速度沿用 config/hardware/fr3.yaml 的 arm.speed_scaling。
+本工具不安排自动往返、不自动执行检测位置，不自动开合夹爪。
+固定相机和码都不动时，移动机械臂前后码的基座位姿应基本一致；
+若码被机械臂挡住，检测会暂时显示无有效位姿。
+若码装在夹爪上，应通过法兰到码的安装外参比较，不能直接把二者位姿当成相等。
+
+7. 2026-10-22 码尺寸更正记录
+---------------------------
+用户重新测得黑码外边长为 95 mm。原始 100 mm 会话和结果原样保留。
+从 28 张原始图像重新检测角点，以 95 mm 重算所有 camera_T_marker，
+保持原始机器人位姿、样本角色和全部样本，不筛掉异常点，再拟合固定相机外参。
+输出：runs/eye_to_hand/20261021-201359-b2979e_marker95mm/samples.json 与 result.json。
+该过程不读取在线硬件，也不是把最终外参矩阵整体乘以 0.95。
+腕部已有手眼外参不因这次 ID20 尺寸更正而直接缩放。
+
+新固定相机结果仍为 quality_failed：训练位置 RMS 10.75 mm、旋转 RMS 3.06 度；
+交叉验证位置 RMS 11.69 mm、旋转 RMS 4.13 度，独立验证样本仍为空。
+相同的双相机标记图像重新分析后，RGB-PnP 与深度平面的有符号距离中位数：
+  固定相机 +38.93 mm -> -3.35 mm；腕部 +17.35 mm -> -2.93 mm。
+标记中心在基座系中的两路差异：17.14 mm -> 8.20 mm；朝向差异仍约 2.23 度。
+这是同一组图像上的离线对照，不是新采集或多姿态精度认证。
+分析目录：runs/occlusion_real/base_pair_20261022_134705_2e07ff/board_verification95mm。
+新外参尚未覆盖主硬件配置；继续实验时显式指定上述新 result.json。
+
+8. 2026-10-22 找回腕部原始样本后的核对
+----------------------------------
+用户提供的实际文件为 /home/seur/data/wpy/armcode-agent (1)/handeye_samples.json。
+包含 20 组眼在手内样本，序列号 349622072103，marker_length_m 已记录为 0.095。
+按原始样本重跑五种 OpenCV 方法后，仍选择 PARK，得到的矩阵与当前
+config/calibration/fr3_handeye_result.json 及 fr3_handeye.yaml 的腕部矩阵
+在浮点精度内一致（最大元素差约 2.8e-17）。
+内部一致性：平移 RMS 2.271 mm、旋转 RMS 1.878 度；不是新的独立精度验收。
+输出：runs/eye_to_hand/wrist_recompute_95mm_20261022/result.json。
+本次没有再次缩放 camera_T_target，也没有更改腕部外参或硬件配置。
+此前“腕部可能也用了100mm”是待查假设；找回的数据支持其已记录95mm，
+当前尺寸修正主要针对新采集的固定相机标定。剩余双视角差异需继续独立验证。

@@ -239,6 +239,9 @@ def extract_multiview(observations, config=None):
                         and fraction > config.max_free_space_violation_fraction,
         })
     geometry_rejected = any(c["rejected"] for c in consistency_checks)
+    geometry_supported = all(c['tested_interior_pixels'] >= config.min_consistency_check_pixels
+                             for c in consistency_checks)
+    geometry_enabled = not geometry_rejected and geometry_supported
     count_matrices, fraction_matrices = [], []
     for s in range(2):
         counts = np.zeros((len(views[s]["nodes"]), len(views[1-s]["nodes"])), int)
@@ -266,13 +269,14 @@ def extract_multiview(observations, config=None):
         row = {
             "nodes": [views[0]["nodes"][i]["node_id"], views[1]["nodes"][j]["node_id"]],
             "status": ("rejected_inconsistent_cross_view_geometry" if geometry_rejected else
-                       ("accepted" if unambiguous else "ambiguous")),
+                       ("unverified_insufficient_geometry_support" if not geometry_supported else
+                        ("accepted" if unambiguous else "ambiguous"))),
             "shared_surface_pixels": [int(count_matrices[0][i, j]), int(count_matrices[1][j, i])],
             "bidirectional_support_fraction": float(score),
             "strongest_competitor_fraction": float(competitor),
         }
         associations.append(row)
-        if unambiguous and not geometry_rejected:
+        if unambiguous and geometry_enabled:
             accepted.append((int(i), int(j)))
     entities, node_to_entity = [], {}
     for i, j in accepted:
@@ -315,7 +319,7 @@ def extract_multiview(observations, config=None):
                 # linked across cameras by an accepted shared-surface match.
                 front_in_source = entity_members[front_entity] & source_ids
                 back_in_destination = entity_members[back_entity] - source_ids
-                distinct = bool(front_in_source or back_in_destination)
+                distinct = bool(front_in_source or back_in_destination) and geometry_enabled
                 deltas = projection["delta"][selection]
                 pixel_list = projection["pixels"][selection]
                 stride = max(1, int(np.ceil(len(pixel_list) / 256)))
@@ -338,14 +342,16 @@ def extract_multiview(observations, config=None):
                 if distinct:
                     edges.append(row)
                 else:
-                    row["reason"] = "cross_view_identity_unresolved_could_be_self_occlusion"
+                    row["reason"] = ("insufficient_cross_view_geometry_support" if not geometry_supported else
+                                     "cross_view_identity_unresolved_could_be_self_occlusion")
                     unresolved.append(row)
     return {
         "schema": "multiview_occlusion_v1", "config": asdict(config),
         "capture_group_id": a["capture_group_id"],
         "geometry_health": {
-            "status": "rejected_inconsistent_depth" if geometry_rejected else "no_large_contradiction_detected",
-            "cross_view_inference_enabled": not geometry_rejected,
+            "status": ("rejected_inconsistent_depth" if geometry_rejected else
+                       ("no_large_contradiction_detected" if geometry_supported else "insufficient_evidence")),
+            "cross_view_inference_enabled": geometry_enabled,
             "checks": consistency_checks,
             "meaning": "rejection_test_only_not_proof_of_calibration_or_scene_synchronization",
         },

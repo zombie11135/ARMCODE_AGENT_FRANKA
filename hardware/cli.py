@@ -40,8 +40,8 @@ def main(argv=None):
         p = arm_sub.add_parser(name)
         p.add_argument("--stack", choices=("real", "fake"))
         if name in ("plan", "move"):
-            p.add_argument("pose", nargs=6, type=float, metavar=("X", "Y", "Z", "RX", "RY", "RZ"),
-                           help="fr3_link8 in fr3_link0: metres and RPY radians")
+            p.add_argument("pose", nargs=6, type=float, metavar="VALUE",
+                           help="X Y Z RX RY RZ: fr3_link8 in fr3_link0, metres and RPY radians")
         if name in ("move", "home"):
             p.add_argument("--execute", action="store_true", help="Authorize execution of this command")
     grip = sub.add_parser("gripper")

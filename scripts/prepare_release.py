@@ -26,6 +26,7 @@ ROOT_FILES = {
     "run_fr3_agent.sh", "run_anygrasp_offline.sh", "run_gsnet_pick.sh",
     "view_gsnet_o3d.sh", "register_object_photos.sh",
     "run_robocasa_scene.sh", "run_occlusion_camera_test.sh",
+    "calibrate_overhead_camera.sh", "test_aruco_pose.sh",
 }
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".txt", ".yaml", ".yml", ".json", ".dot", ".svg"}
 EXTRA_FILES = {
