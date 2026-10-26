@@ -56,10 +56,12 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
         target_rpy: Tuple[float, float, float] = (3.14, 0.0, -1.57),
         target_rx: float = math.pi,
         target_ry: float = 0.0,
+        target_rz: float = -1.57,
         max_rx_tilt_deg: float = 65.0,
         max_ry_tilt_deg: float = 65.0,
         lam_rx: float = 1.0,
         lam_ry: float = 1.0,
+        lam_rz: float = 0.25,
         enable_pose_fix: bool = True,
         grasp_selection_mode: str = "random_top_k_good",
         random_select_top_k: int = 5,
@@ -107,9 +109,12 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
             if self.context.transforms is not None:
                 fr3_args = {key: grasp_input.get(key) for key in ("capture_geometry", "points_path")}
                 fr3_args['retain_all_candidates'] = True
-                selection_options = dict(target_rx=target_rx, target_ry=target_ry,
+                provenance = grasp_input.get('observation_provenance') or {}
+                fr3_args['scene_token'] = [provenance.get('scope'), provenance.get('scene_epoch')]
+                selection_options = dict(target_rx=target_rx, target_ry=target_ry, target_rz=target_rz,
                     max_rx_tilt_deg=max_rx_tilt_deg, max_ry_tilt_deg=max_ry_tilt_deg,
-                    lam_rx=lam_rx, lam_ry=lam_ry, grasp_selection_mode=grasp_selection_mode,
+                    lam_rx=lam_rx, lam_ry=lam_ry, lam_rz=lam_rz, enable_pose_fix=enable_pose_fix,
+                    grasp_selection_mode=grasp_selection_mode,
                     random_select_top_k=random_select_top_k, random_seed=random_seed,
                     fallback_to_raw_when_no_good=fallback_to_raw_when_no_good)
                 from hardware.agent_geometry import validate_pose_selection

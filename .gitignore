@@ -76,6 +76,7 @@ config/perception/references.yaml
 config/calibration/*.yaml
 !config/calibration/*.example.yaml
 config/calibration/*result*.json
+config/calibration/robotiq_contact_baseline.json
 config/calibration/source/
 anyplace_real/config/real_saved_xarm_snapshot.json
 /data/*

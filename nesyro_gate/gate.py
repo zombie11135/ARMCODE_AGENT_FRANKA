@@ -10,6 +10,7 @@ from nesyro_gate.rules import (
     suggest_probe,
     verify_step,
     semantic_identity_score,
+    has_fixed_container_plan,
 )
 from nesyro_gate.types import GateDecision, GateResult, SceneMemory, SkillName, Step, TaskSpec
 
@@ -52,6 +53,8 @@ def _append_confidence_failures(
     elif step.name == SkillName.PLACE:
         plate = scene_memory.get_object(step.args["plate"])
         if plate is None:
+            return merged
+        if has_fixed_container_plan(plate):
             return merged
         csc = (
             0.5 * plate.ocr_match_score

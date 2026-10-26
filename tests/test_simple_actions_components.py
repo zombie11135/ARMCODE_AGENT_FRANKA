@@ -59,15 +59,19 @@ def test_restored_caches_are_shared_by_observation_placement_and_gate_probe(monk
     assert plans["tray__pink"]["place_pose_mmrad"][1] == 100
     arm.set_position.assert_not_called()
 
-    # A Gate probe must invalidate the very same cached plan before observing.
+    # A Gate probe reuses a fixed container without observing or moving again.
     robot.observe = Mock(return_value=SkillResult(True, data={"refreshed": True}))
     result = robot._run_gate_probe(
         place("pink tray"), current_holding="box", suggested_probe="observe_container", reason="test"
     )
     assert result.success
-    assert "tray__pink" not in plans
-    assert "pink tray" not in observations
-    robot.observe.assert_called_once_with("pink tray")
+    assert "tray__pink" in plans
+    assert "pink tray" in observations
+    assert result.data['container_plan_reused'] is True
+    robot.observe.assert_not_called()
+    # Explicit invalidation remains available, including aliases of this tray.
+    robot._invalidate_container_cache('pink tray')
+    assert 'tray__pink' not in plans and 'pink tray' not in observations
 
 
 @pytest.mark.parametrize("failure", [None, "approach", "place", "gripper", "lift"])
@@ -167,6 +171,30 @@ def test_action_sequence_preserves_hooks_and_stops_after_failed_grasp(monkeypatc
     assert result.data["failed_action"] == {"op": "grasp", "target": "药盒"}
     assert "tray__pink" in robot.place_plans  # Container pre-observation still ran first.
     robot.place.assert_not_called()
+
+
+def test_next_run_localizes_container_again_instead_of_reusing_previous_task(monkeypatch, place_plan):
+    from copy import deepcopy
+    from skill_lib.combound.place_to_container import PlaceToContainerSkill
+    from runtime.observation_memory import StaleObservationError
+    plan_skill = Mock(side_effect=lambda **kwargs: SkillResult(True, deepcopy(place_plan)))
+    monkeypatch.setattr(PlaceToContainerSkill, 'run', plan_skill)
+    robot = SimpleRobotActions(RuntimeContext(), SimpleRobotConfig(
+        enable_nesyro_gate=False, nesyro_gate_trace_path='', gate_experience_log_path=''))
+    robot.home = Mock(return_value=SkillResult(True))
+    robot.grasp = Mock(return_value=SkillResult(True))
+    actions = [grasp('medicine'), place('blue tray')]
+    assert robot.run(actions).success
+    previous = deepcopy(robot.place_plans['tray__blue'])
+    assert robot.place_counts['tray__blue'] == 1
+    assert robot.run(actions).success
+    assert plan_skill.call_count == 2
+    assert robot.place_counts['tray__blue'] == 1
+    assert previous['task_container']['task_id'] != robot.place_plans['tray__blue']['task_container']['task_id']
+    robot._move_xarm = Mock(side_effect=AssertionError('Old task must not move'))
+    with pytest.raises(StaleObservationError, match='not registered for this task'):
+        robot._execute_cached_place(previous)
+    robot._move_xarm.assert_not_called()
 
 
 def test_gate_trace_serializes_nested_values_after_extraction(tmp_path):

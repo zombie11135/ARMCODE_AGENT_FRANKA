@@ -112,7 +112,7 @@ def main():
         successful_requests=sum(r['success'] for r in runs), rejected_requests=sum(not r['success'] for r in runs),
         correctly_localized=correctly_localized if truth is not None else None,
         false_accepts=false_accepts if truth is not None else None,
-        note='Real production recognition code on saved RGB; no live RGB-D or robot validation. Last three wrist photos are adjacent frames.')
+        note='Real production recognition code on saved RGB; no live RGB-D or robot validation. Adjacent frames, if present, are not independent test scenes.')
     atomic_json(args.output/'results.json', dict(summary=summary, runs=runs))
     atomic_json(args.output/'summary.json', summary)
     print(json.dumps(summary, ensure_ascii=False, indent=2))

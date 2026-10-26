@@ -63,6 +63,20 @@ def test_credential_blocks_export_without_printing_value(tmp_path):
     assert not destination.exists()
 
 
+def test_export_includes_experiment_sources_and_reports(tmp_path):
+    root = tmp_path / "workspace"
+    sources = ("test_gripper_contact.sh", "skill_lab/test_segment_obj",
+               "ANYPLACE_REAL_STAGE1_REPORT.md", "ANYPLACE_REAL_STAGE2_REPORT.md",
+               "PERCEPTION_V2_INITIAL_REPORT.md")
+    for name in sources:
+        write(root, name)
+    write(root, "config/calibration/robotiq_contact_baseline.json")
+    destination = tmp_path / "release"
+    assert export(root, destination) == len(sources)
+    assert all((destination / name).is_file() for name in sources)
+    assert not (destination / "config/calibration/robotiq_contact_baseline.json").exists()
+
+
 def test_symlinks_and_tracked_local_files_rejected(tmp_path):
     target = write(tmp_path, "private.txt")
     link = tmp_path / "app" / "leak.py"

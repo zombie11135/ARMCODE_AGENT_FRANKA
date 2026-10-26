@@ -336,12 +336,13 @@ class AgentWiringTests(OfflineTestCase):
     def test_runtime_stops_before_models_cameras_or_motion(self):
         from agents.simple_agent_system import SimpleAgentSystemConfig, SimpleArmCodeAgentSystem
         from agents.simple_execution_runtime import SimpleExecutionRuntime
+        from core.actions import grasp, place
         from hardware.config import DEFAULT_CONFIG
         cfg = SimpleAgentSystemConfig(goal="test", hardware_config_path=str(DEFAULT_CONFIG), execute_robot=True)
         runtime = SimpleExecutionRuntime(cfg)
         with patch("hardware.runtime.load_transforms", return_value=PendingTransforms()), patch.object(runtime, "_build_execution_context") as make_context:
             with self.assertRaises(RuntimeError):
-                runtime.run([])
+                runtime.run([grasp("西瓜霜"), place("blue tray")])
             make_context.assert_not_called()
         agent = SimpleArmCodeAgentSystem(cfg)
         with patch("hardware.runtime.load_transforms", return_value=PendingTransforms()), patch.object(agent, "_planning_stage") as planner:
@@ -356,11 +357,14 @@ class AgentWiringTests(OfflineTestCase):
         with patch("skill_lab.run_agent_system.init_arm", side_effect=AssertionError("legacy arm")), \
                 patch("skill_lab.run_agent_system.call_grip_service", side_effect=AssertionError("ROS 1")), \
                 patch("hardware.runtime.load_config", return_value=HardwareConfig()), \
+                patch("hardware.runtime.FrankaMoveItArm") as arm_type, \
                 patch("sys.stdout", new_callable=io.StringIO) as out:
+            arm_type.return_value.get_pose.return_value = Pose6D(.4, 0., .5, 3.14, 0., -1.57)
             self.assertTrue(run_builtin_command("/open", args))
             self.assertIn("尚未配置", out.getvalue())
             self.assertTrue(run_builtin_command("/home", args))
-            self.assertIn("home_pose", out.getvalue())
+            self.assertIn("记录为本会话 home", out.getvalue())
+            arm_type.return_value.move_pose.assert_not_called()
 
 
 if __name__ == "__main__":

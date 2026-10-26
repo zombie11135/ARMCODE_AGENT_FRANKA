@@ -45,6 +45,8 @@ class SimpleCodeGenerator:
 
     @staticmethod
     def _validate_action_order(actions: List[SimpleAction]) -> None:
+        if not actions:
+            raise ValueError('规划没有可执行动作：需要绑定 observe/grasp/place 技能，不能只返回文字 macro 节点。')
         holding = None
         for index, action in enumerate(actions, start=1):
             if not action.target.strip():

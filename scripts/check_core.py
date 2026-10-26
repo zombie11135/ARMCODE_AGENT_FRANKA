@@ -11,6 +11,7 @@ TESTS = (
     "test_simple_actions_components.py",
     "test_planner_action_integrity.py",
     "test_multi_target_planning.py",
+    "test_same_session_replanning.py",
     "test_gate.py",
     "test_gate_runtime_integration.py",
     "test_gate_experience_logging.py",
@@ -24,6 +25,7 @@ TESTS = (
     "test_camera_startup.py",
     "test_observation_memory.py",
     "test_perception_pipeline.py",
+    "test_task_perception_pipeline.py",
     "test_reference_recognition.py",
     "test_observe_gallery.py",
     "test_reference_capture.py",
@@ -37,9 +39,13 @@ TESTS = (
     "test_occlusion_robot_pair.py",
     "test_occlusion_primary_aux.py",
     "test_geometry_occlusion_agent.py",
+    "test_occlusion_recovery_planner.py",
     "test_aruco_pose.py",
     "test_eye_to_hand.py",
     "test_fr3_hardware.py",
+    "test_agent_home_command.py",
+    "test_grasp_yaw_preference.py",
+    "test_gripper_process.py",
 )
 
 

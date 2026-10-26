@@ -246,14 +246,27 @@ def test_wrist_verification_forces_one_fresh_view(calibrated):
     assert calibrated.device.capture_wrist.call_count == 6
 
 
-def test_container_skill_hit_and_probe_recompute_old_place_plan(calibrated, monkeypatch):
+def _container_plan():
+    return dict(center_base_xyz=[.3, .2, .1],
+        selected_detection=dict(confidence=.7345, color_score=.08, label='blue tray'),
+        approach_pose_mmrad=[300, 200, 420, math.pi, 0, 0],
+        place_pose_mmrad=[300, 200, 300, math.pi, 0, 0],
+        lift_pose_mmrad=[300, 200, 420, math.pi, 0, 0])
+
+
+def _container_observer(robot):
+    from core.skill_base import SkillResult
+    def observe(**kwargs):
+        source = robot.context.camera.capture_wrist()
+        return SkillResult(True, data=dict(_container_plan(), image_path=source['color_path']))
+    return observe
+
+
+def test_fixed_container_reuse_skips_capture_even_after_forced_camera_refresh(calibrated, monkeypatch):
     from core.skill_base import SkillResult
     from skill_lib.combound.place_to_container import PlaceToContainerSkill
     robot = make_robot(calibrated)
-    def observe(**kwargs):
-        source = robot.context.camera.capture_wrist()
-        return SkillResult(True, data={'image_path': source['color_path'], 'center_base_xyz': [.3, .2, .1]})
-    run = Mock(side_effect=observe)
+    run = Mock(side_effect=_container_observer(robot))
     monkeypatch.setattr(PlaceToContainerSkill, 'run', run)
     first = robot.observe_container('pink tray')
     calibrated.pose[0] += .01
@@ -263,9 +276,113 @@ def test_container_skill_hit_and_probe_recompute_old_place_plan(calibrated, monk
     assert run.call_count == 1
     with fresh_camera(robot.context.camera, 'probe'):
         second = robot._observe_container_action('pink tray')
-    assert second.data['image_path'] != first.data['image_path']
-    assert run.call_count == 2
+    assert second.data['image_path'] == first.data['image_path']
+    assert run.call_count == 1
     assert robot.place_plans['tray__pink'] == second.data
+
+
+def test_grasp_then_place_reuses_fixed_container_without_ocr_probe(calibrated, monkeypatch):
+    from core.actions import place
+    from skill_lib.combound.place_to_container import PlaceToContainerSkill
+    from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+    from core.skill_base import SkillResult
+    robot = make_robot(calibrated)
+    robot.config.execute = True
+    robot.config.nesyro_gate_trace_path = ''
+    robot.config.gate_experience_log_path = ''
+    observe = Mock(side_effect=_container_observer(robot))
+    monkeypatch.setattr(PlaceToContainerSkill, 'run', observe)
+    first = robot.observe_container('blue tray')
+    assert first.success
+    source_epoch = first.data['observation_provenance']['scene_epoch']
+    robot.observations['old_box'] = {'kind': 'medicine'}
+    monkeypatch.setattr(FindAndGraspMedicineSkill, 'run', Mock(return_value=SkillResult(True)))
+    assert robot.grasp('medicine').success
+    assert 'old_box' not in robot.observations and 'medicine' not in robot.observations
+    assert 'tray__blue' in robot.place_plans
+    assert calibrated.camera.observation_memory.scene_epoch > source_epoch
+    # Wrist movement and age affect RGB-D, not fixed base-frame container facts.
+    calibrated.pose[0] += .2
+    calibrated.now[0] += 600
+    robot.config.enable_geometry_occlusion = True
+    robot.observe = Mock(side_effect=AssertionError('No container recapture while holding'))
+    robot._move_xarm = Mock(return_value=True)
+    robot.gripper_open = Mock(return_value=True)
+    gate = robot.gate_before_action(place('blue tray'), current_holding='medicine')
+    assert gate.success
+    assert len(gate.data['gate_attempts']) == 1
+    assert gate.data['gate']['decision'] == 'EXECUTE'
+    assert gate.data['gate']['scene_objects']['blue tray']['fixed_for_task']
+    assert gate.data['gate']['scene_objects']['blue tray']['ocr_match_score'] == .6
+    assert robot.place('blue tray').success  # Includes the real scene_mutation boundary.
+    assert robot.place_counts['tray__blue'] == 1
+    assert 'tray__blue' in robot.place_plans
+    assert robot._move_xarm.call_count == 3 and robot.gripper_open.call_count == 1
+    robot.observe.assert_not_called()
+    assert observe.call_count == 1 and calibrated.device.capture_wrist.call_count == 3
+    empty = robot.gate_before_action(place('blue tray'), current_holding=None)
+    assert not empty.success and empty.data['failure_type'] == 'nesyro_gate_empty_gripper'
+    robot.place_counts['tray__blue'] = 3
+    full = robot.gate_before_action(place('blue tray'), current_holding='medicine')
+    assert not full.success and 'plate_no_free_space' in full.data['failed_conditions']
+    assert 'ocr_low_confidence' not in full.data['failed_conditions']
+    robot.observe.assert_not_called()
+
+
+def test_new_task_and_explicit_container_refresh_require_new_localization(calibrated, monkeypatch):
+    from skill_lib.combound.place_to_container import PlaceToContainerSkill
+    from runtime.observation_memory import StaleObservationError
+    robot = make_robot(calibrated)
+    observe = Mock(side_effect=_container_observer(robot))
+    monkeypatch.setattr(PlaceToContainerSkill, 'run', observe)
+    first = robot.observe_container('blue tray')
+    assert robot._observe_container_action('蓝色盘子').success  # Alias, no new localization.
+    assert observe.call_count == 1
+    robot.place_counts['tray__blue'] = 1
+    calibrated.camera.observation_memory.invalidate('new_task', discard_scene=True)
+    assert not robot.place_plans and not robot.observations and not robot.place_counts
+    robot._move_xarm = Mock(side_effect=AssertionError('Old task must not move'))
+    with pytest.raises(StaleObservationError, match='not registered for this task'):
+        robot._execute_cached_place(first.data)
+    assert robot.observe_container('blue tray').success
+    assert observe.call_count == 2
+    robot._invalidate_container_cache('蓝色盘子')
+    assert robot.observe_container('blue tray').success
+    assert observe.call_count == 3
+    robot._move_xarm.assert_not_called()
+
+
+@pytest.mark.parametrize('bad_plan', [{}, {'place_pose_mmrad': [300, 200, 300, 0, 0, 0]},
+    dict(_container_plan(), lift_pose_mmrad=[300, 200, float('nan'), 0, 0, 0])])
+def test_incomplete_container_localization_never_locks_a_plan(calibrated, monkeypatch, bad_plan):
+    from skill_lib.combound.place_to_container import PlaceToContainerSkill
+    from core.skill_base import SkillResult
+    robot = make_robot(calibrated)
+    def incomplete(**kwargs):
+        robot.context.camera.capture_wrist()
+        return SkillResult(True, data=bad_plan)
+    monkeypatch.setattr(PlaceToContainerSkill, 'run', Mock(side_effect=incomplete))
+    result = robot.observe_container('blue tray')
+    assert not result.success and result.data['failure_type'] == 'invalid_container_place_plan'
+    assert not robot.place_plans and not robot._task_container_plans
+
+
+def test_task_container_registry_does_not_allow_changed_coordinates(calibrated, monkeypatch):
+    from copy import deepcopy
+    from skill_lib.combound.place_to_container import PlaceToContainerSkill
+    from runtime.observation_memory import StaleObservationError
+    robot = make_robot(calibrated)
+    monkeypatch.setattr(PlaceToContainerSkill, 'run', Mock(side_effect=_container_observer(robot)))
+    first = robot.observe_container('blue tray')
+    changed = deepcopy(first.data)
+    changed['place_pose_mmrad'][0] += 50
+    robot._move_xarm = Mock(side_effect=AssertionError('Unregistered coordinates must not move'))
+    with pytest.raises(StaleObservationError, match='not registered for this task'):
+        robot._execute_cached_place(changed)
+    robot.config.enable_place_slot_offsets = True
+    shifted = robot._offset_place_plan(first.data, 1)
+    assert robot._is_task_container_plan(shifted)
+    robot._move_xarm.assert_not_called()
 
 
 @pytest.mark.parametrize('action', ['place', 'clear'])

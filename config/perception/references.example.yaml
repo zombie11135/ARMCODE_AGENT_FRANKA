@@ -10,7 +10,7 @@ medicine_detector_prompt: medicine_box
 vector_library_dir: ../../data/object_gallery/vector_libraries/mobileclip2_b
 device: cuda:0
 # Exploratory wrist-photo thresholds, not independently calibrated probabilities.
-min_similarity: 0.80
+min_similarity: 0.75
 min_class_margin: 0.02
 top_k_references: 3
 batch_size: 16

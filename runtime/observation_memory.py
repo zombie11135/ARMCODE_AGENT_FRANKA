@@ -235,15 +235,25 @@ def scene_mutation(reason):
         def invoke(owner, *args, **kwargs):
             context = getattr(owner, 'context', owner)
             memory = memory_for(getattr(context, 'camera', None))
+            plan = kwargs.get('plan', kwargs.get('place_plan',
+                args[0] if args and isinstance(args[0], dict) else {}))
+            def fixed_container_plan():
+                if reason != 'place' or 'task_container' not in plan:
+                    return False
+                check = getattr(owner, '_is_task_container_plan', None)
+                if not callable(check) or not check(plan):
+                    raise StaleObservationError('Container plan is not registered for this task')
+                return True
             if memory is None:
+                fixed_container_plan()
                 return function(owner, *args, **kwargs)
             with memory.device_lock:
-                plan = kwargs.get('plan', args[0] if args and isinstance(args[0], dict) else {})
+                fixed_container = fixed_container_plan()
                 provenance = plan.get('grasp_input', {}).get('observation_provenance')
                 if provenance is not None and not memory.commit(provenance['epoch'], lambda: None):
                     raise StaleObservationError('Scene changed after grasp planning; replan before execution')
                 place_provenance = plan.get('observation_provenance')
-                if place_provenance is not None and not memory.commit(
+                if place_provenance is not None and not fixed_container and not memory.commit(
                         place_provenance['scene_epoch'], lambda: None, scene_only=True):
                     raise StaleObservationError('Scene changed after place planning; observe container again')
                 with memory.mutation(reason):

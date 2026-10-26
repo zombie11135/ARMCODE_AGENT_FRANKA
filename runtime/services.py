@@ -117,6 +117,12 @@ def build_execution_context(config, *, camera, event_callback=None):
     workers = getattr(camera, 'perception_workers', 1)
     if type(workers) is not int:
         workers = 1
+    recovery_planner = None
+    if getattr(config, 'enable_llm_occlusion_recovery', False):
+        if not getattr(config, 'enable_geometry_occlusion', False):
+            raise ValueError('LLM occlusion recovery requires geometry occlusion')
+        from agents.occlusion_recovery_planner import build_recovery_planner
+        recovery_planner = build_recovery_planner(config)
     return (
         RuntimeContext(
             camera=cached_camera,
@@ -128,6 +134,7 @@ def build_execution_context(config, *, camera, event_callback=None):
             event_callback=event_callback,
             perception_workers=workers,
             occlusion=build_occlusion_service(config),
+            occlusion_recovery_planner=recovery_planner,
         ),
         camera,
     )

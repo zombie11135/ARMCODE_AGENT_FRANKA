@@ -18,6 +18,7 @@ class RuntimeContext:
         object_references=None,
         perception_workers=1,
         occlusion=None,
+        occlusion_recovery_planner=None,
     ):
         self.camera = camera
         self.vlm = vlm
@@ -34,6 +35,7 @@ class RuntimeContext:
         self.object_references = object_references
         self.perception_workers = perception_workers
         self.occlusion = occlusion
+        self.occlusion_recovery_planner = occlusion_recovery_planner
 
     def require(self, name: str):
         value = getattr(self, name, None)

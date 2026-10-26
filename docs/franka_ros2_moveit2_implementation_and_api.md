@@ -592,7 +592,7 @@ transforms.tcp_to_flange_pose(base_tcp) -> Pose6D
 
 YAML 的 `calibration_file`、`gripper.contact_close_file`、`perception.reference_config` 相对硬件 YAML 所在目录解析。workspace 要求绝对路径。未知配置键会报错，避免拼错后静默采用默认值。
 
-`place_flange_z_m=0.30` 指最终释放时法兰的基座 Z，应用于 TCP 转法兰之后，不是 TCP 高度，也不是桌面间隙。`FrankaMoveItArm.home()` 在 home_pose=null 时拒绝执行；完整 Agent 可以另行使用本轮起始实际法兰姿态作为任务内 home，二者不同。
+`place_flange_z_m=0.30` 指最终释放时法兰的基座 Z，应用于 TCP 转法兰之后，不是 TCP 高度，也不是桌面间隙。`FrankaMoveItArm.home()` 在 home_pose=null 时拒绝执行；完整 Agent 的任务和交互 `home` 则共享进程内的会话记录：首次采用配置位姿或实际法兰位姿，后续通过 `move_pose()` 返回该位置，不在任务失败后重新定义 home。尚无记录且配置为空时，第一次交互 `home` 仅记录当前位置，不移动。该记录不跨进程保存。
 
 ## 11. 命令行使用
 

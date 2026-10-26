@@ -1,0 +1,113 @@
+电脑与硬盘迁移说明
+==================
+
+适用：2026-10-26 检查的 FR3 实验电脑。以下路径是当前部署记录，
+不是所有协作者必须使用的路径。安装通则见 SETUP.md、../THIRD_PARTY.md。
+
+一、GitHub 同步的是源码，不是整套已安装系统
+
+当前仓库包含 Agent、技能、遮挡分析、硬件适配、测试、启动脚本、
+配置模板和 data/object_gallery 的参考图片。正常更新继续提交到已有的
+feat/occlusion-observation-scheduling 分支，不需要重新创建仓库或 Git 历史。
+
+以下内容保留本机，不随 Git 推送：
+- config/local.env（解释器、API 配置等）。
+- config/hardware/fr3.yaml、robotiq_contact_close.json。
+- config/perception/references.yaml。
+- config/calibration 下的实际手眼/TCP 标定、夹爪基线和原始标定资料。
+- Python 环境、模型权重、图库向量缓存、第三方 SDK、授权和运行日志。
+- 本仓库以外的 ROS 2 / MoveIt 2 工作区及 Docker 镜像。
+
+这些文件需要独立备份。含 API 凭据、授权和实际设备配置的备份应放在
+仓库之外并私下迁移；不要用 git add -f 把它们强行加入源码仓库。
+RELEASE_MANIFEST.json 只记录首次源码快照，后续提交不自动重写它。
+
+二、当前电脑的数据盘和系统盘分布
+
+读取 findmnt 和 Docker daemon 配置得到：
+
+数据盘：/home/seur/data，设备 /dev/sda2，ext4。
+- 当前源码：/home/seur/data/wpy/armcode-agent (1)/armcode-agent。
+- 主环境：/home/seur/data/wpy/conda_envs/env_armcode_agent。
+- 模型目录：/home/seur/data/wpy/models。
+- 外部 ROS 工作区：/home/seur/data/wpy/armcode_agent。
+  该目录不属于当前 Git 仓库；需要另外保留 compose.yaml、Dockerfile、
+  机器人配置、源码和构建资料。
+
+系统盘：/，设备 /dev/nvme0n1p2，ext4。
+- AnyGrasp 环境：/home/seur/anaconda3/envs/anygrasp。
+- AnyGrasp SDK：/home/seur/franka_teleop/graspNet/anygrasp_sdk。
+  当前抓取权重也位于该 SDK 目录中。
+- Docker daemon 数据目录：/var/lib/docker。
+- 操作系统、显卡驱动、系统依赖和用户级 Git/SSH 配置等也不由数据盘携带。
+
+因此，只把当前 /home/seur/data 所在硬盘移到新电脑，会保留很多文件，
+但会缺少上述系统盘中的依赖，不能视为完整部署迁移。
+如果操作系统盘和其他依赖盘也一起搬走、原路径保持一致，可复用的部分更多；
+仍需确认新硬件的驱动、网络和外设是否可用。
+
+三、路径和 Python 环境的注意事项
+
+新电脑尽量把数据盘仍挂载到 /home/seur/data，并保留相同用户及文件权限。
+即使使用相同挂载点，也要实际验证解释器与本地扩展，不能仅看目录是否存在。
+改变挂载点或用户名时，需同步调整 config/local.env、硬件/感知配置、
+启动脚本中的实际路径，以及 Python 环境的绝对路径引用。
+
+当前 .venv-mobileclip2-fr3/bin/python 链接到主 Conda 环境的解释器；
+pyvenv.cfg 开启 include-system-site-packages。只复制这个 .venv 目录不够。
+保留主环境，或者在新电脑重建对应的 Python 3.10 环境。
+旧机器的 pip freeze / conda env export 可作版本记录，但不是跨平台兼容保证；
+AnyGrasp、PyTorch 和 CUDA 本地扩展需与新电脑架构、Python 和驱动匹配。
+
+四、迁移前应另行保留什么
+
+1. 上述被 Git 忽略的本机配置和标定资料。
+2. AnyGrasp SDK、已验证的权重和环境版本；其他用到的模型及环境版本记录。
+3. 外部 ROS 工作区及其部署资料。当前 Compose 使用 armcode-fr3:real 和
+   armcode-fr3:humble 镜像；只复制工作区不会复制已经构建的 Docker 镜像。
+   可用 docker image save 在仓库之外导出镜像，在新电脑 docker image load；
+   Compose 文件、绑定挂载目录和卷内的数据需要另行保留。
+4. 模型、图库和运行记录中自己需要保留的数据；不要把 GitHub 当成这些数据的备份。
+
+AnyGrasp 的授权流程包含工作机器的 machine feature ID。更换电脑后应按
+官方工具检查授权是否适用，必要时重新申请；不能假设硬盘搬过去授权就有效。
+https://github.com/graspnet/anygrasp_sdk/blob/main/license_registration/README.md
+
+Docker 数据路径与配置说明：
+https://docs.docker.com/engine/daemon/
+
+五、新电脑恢复的建议顺序
+
+1. 挂载数据盘、确认文件权限与路径；安装匹配新硬件的 NVIDIA 驱动及系统依赖。
+   GPU 容器仍依赖宿主机驱动；使用 GPU 容器时另配 NVIDIA Container Toolkit。
+   https://github.com/NVIDIA/nvidia-container-toolkit
+2. 恢复/重建 Python 环境与 AnyGrasp SDK，核对权重路径及授权。
+3. 恢复 Docker、Compose、镜像和外部 ROS 工作区，核对 FR3 网络接口/IP。
+4. 恢复本机配置，核对相机序列号、USB 连接和夹爪串口权限。
+   优先使用稳定的 /dev/serial/by-id 路径，避免串口编号改变。
+5. 在仓库根目录先运行不使用设备的检查（使用已安装 requirements-dev.txt 的环境）：
+
+   python scripts/check_core.py
+   python -m app --help
+
+   然后用配置好的真机环境运行 python -m hardware.cli config，
+   再逐项验证模型离线推理、相机采集、机械臂只读状态和夹爪通信，最后验证运动。
+   离线测试通过不代表 GPU、SDK 授权和真机环境已全部配置好。
+
+仅更换电脑，若机器人、相机安装、夹爪/TCP 都保持不变，原标定可保留并复核，
+不必因为电脑更换就一律重做标定。若安装位置、工具或坐标定义发生改变，
+则应重新标定对应变换；图像分辨率改变后使用实际流返回的对齐内参。
+
+六、以后从 GitHub 获取源码
+
+新电脑尚无工作副本：
+
+   git clone --branch feat/occlusion-observation-scheduling --single-branch \
+     https://github.com/zombie11135/ARMCODE_AGENT_FRANKA.git
+
+已有工作副本：先运行 git status，保存自己的未提交修改，再运行：
+
+   git switch feat/occlusion-observation-scheduling
+   git pull --ff-only
+
+这些命令只获取/更新源码，不安装上述环境，不恢复本机配置，也不启动设备。

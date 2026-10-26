@@ -27,7 +27,7 @@ def test_vlm_occlusion_blocks_grasp_even_when_text_visible() -> None:
             "grasp_input": {
                 "object_id": "obj_1",
                 "bbox": [20, 20, 100, 100],
-                "depth_path": "runs/current_capture/wrist_depth.png",
+                "depth_path": "offline-test-fixture://unavailable-depth.png",
                 "ocr_text": "布洛芬",
             },
             "vlm_occlusion": {

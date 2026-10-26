@@ -7,6 +7,7 @@ Action values and configuration retain their historical import paths here.
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from uuid import uuid4
 
 from core.actions import (
     SimpleAction as SimpleAction,
@@ -62,6 +63,10 @@ class SimpleRobotActions:
         self.place_plans: Dict[str, Dict[str, Any]] = {}
         self.place_counts: Dict[str, int] = {}
         self.observations: Dict[str, Dict[str, Any]] = {}
+        self._pipeline_frame_bindings = set()
+        self._container_task_id = uuid4().hex
+        self._task_container_plans = {}
+        self._task_run_started = False
         from runtime.observation_memory import memory_for
         memory = memory_for(getattr(context, 'camera', None))
         if memory is not None:
@@ -70,6 +75,7 @@ class SimpleRobotActions:
         self.occlusion_recovery_counts: Dict[str, int] = {}
         self.geometry_buffer_slots_used = 0
         self.geometry_occlusion_events = []
+        self.geometry_recovery_state = {'observation_counts': {}, 'history': []}
         # Phase-1 unified gate cache (feature reuse: one facade per config key).
         self._unified_gate = None
         self._unified_gate_key: Optional[Tuple[str, str, float, int]] = None
@@ -77,13 +83,24 @@ class SimpleRobotActions:
         self._last_gate_decision_id: Optional[str] = None
 
     def _discard_scene_evidence(self, reason):
-        # These are derived from images too, not just ObservationMemory entries.
-        # Keep placement counts/task progress; discard obsolete geometric plans.
-        self.observations.clear()
-        self.place_plans.clear()
+        self._pipeline_frame_bindings.clear()
+        from skill_lib.actions.task_containers import discard_scene_evidence
+        discard_scene_evidence(self, reason)
+
+    def _is_task_container_plan(self, plan):
+        from skill_lib.actions.task_containers import is_task_container_plan
+        return is_task_container_plan(self, plan)
 
     def run(self, actions: Iterable[SimpleAction]) -> SkillResult:
         actions = list(actions)
+        if self._task_run_started:
+            from runtime.observation_memory import invalidate_camera, memory_for
+            camera = getattr(self.context, 'camera', None)
+            if memory_for(camera) is not None:
+                invalidate_camera(camera, 'new_task')
+            else:
+                self._discard_scene_evidence('new_task')
+        self._task_run_started = True
         try:
             preobserve_result = self.preobserve_containers(actions)
             if not preobserve_result.success:
@@ -196,8 +213,10 @@ class SimpleRobotActions:
             total_steps=total_steps,
         )
 
-    def build_scene_memory(self, current_holding: Optional[str] = None):
-        return gate.build_scene_memory(self, current_holding=current_holding)
+    def build_scene_memory(self, current_holding: Optional[str] = None,
+                           *, geometry_prepared_target: Optional[str] = None):
+        return gate.build_scene_memory(self, current_holding=current_holding,
+                                      geometry_prepared_target=geometry_prepared_target)
 
     def _action_to_gate_step(
         self,

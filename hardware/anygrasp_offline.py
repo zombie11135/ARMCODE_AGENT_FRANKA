@@ -151,7 +151,10 @@ def replay(args):
         write_json(output / 'selected_preview.json', dict(backend='anygrasp',
                    selected=plan['selected'], geometry=plan['geometry'],
                    hardware_accessed=False, motion_command_sent=False, moveit_checked=False))
-        np.save(output / 'selected.npy', group.grasp_group_array[[selection['selected_candidate_index']]])
+        selected_row = group.grasp_group_array[[selection['selected_candidate_index']]].copy()
+        selected_row[0, 4:13] = np.asarray(plan['selected']['rotation_matrix']).reshape(-1)
+        selected_row[0, 13:16] = plan['selected']['translation_m']
+        np.save(output / 'selected.npy', selected_row)
     accepted = [row['candidate_index'] for row in selection['candidates'] if row['accepted']]
     np.save(output / 'eligible_candidates.npy', group.grasp_group_array[accepted])
     write_json(output / 'pose_selection.json', selection)

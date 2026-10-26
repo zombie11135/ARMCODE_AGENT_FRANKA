@@ -1,5 +1,8 @@
 """GSNet implementation of the legacy grasp service contract, isolated in a child process."""
 import json
+import hashlib
+from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +42,7 @@ class GSNetService:
         self.config = load_config(config_path)
         self.transforms = load_transforms(self.config)
         self.last_run = None
+        self._candidate_cache = OrderedDict()
 
     def _model_request(self, **options):
         root = Path(self.config.perception.gsnet_root)
@@ -107,6 +111,27 @@ class GSNetService:
             request['target_mask_path'] = str(root / 'target_mask.npy')
         request_path = root / 'request.json'
         request_path.write_text(json.dumps(request, indent=2))
+        # Cache model output only. Final yaw selection, frame validation and
+        # motion planning still run at consumption time. Content hashes prevent
+        # a rewritten file or a changed ROI/mask from borrowing old candidates.
+        cache_input = {k: v for k, v in request.items()
+                       if k not in ('capture_dir', 'output_dir', 'target_mask_path')}
+        cache_input.update(cloud_sha256=hashlib.sha256((capture/'scene.ply').read_bytes()).hexdigest(),
+            mask_sha256=(hashlib.sha256(mask.astype(bool).tobytes()).hexdigest()
+                         if request.get('target_mask_path') else None),
+            color_intrinsics=k, capture_geometry=capture_geometry, workcell=workcell,
+            scene_token=kwargs.get('scene_token'))
+        cache_key = hashlib.sha256(json.dumps(cache_input, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        if cache_key in self._candidate_cache:
+            self._candidate_cache.move_to_end(cache_key)
+            result = deepcopy(self._candidate_cache[cache_key])
+            result.update(result_json_path=str(output_json_path), inference_cache_hit=True)
+            output = Path(output_json_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(json.dumps(result, indent=2))
+            self.last_run = Path(result['run_dir'])
+            print(f'[perception_pipeline] {self.backend} candidate cache hit; inference skipped')
+            return result
         with (root / 'inference.log').open('w') as log:
             try:
                 self._run_inference(request_path, log)
@@ -134,11 +159,14 @@ class GSNetService:
                   'candidate_grasps_camera': candidates,
                   'run_dir': str(root), 'workcell': workcell, **selection,
                   'roi_source': 'sam_mask' if request.get('target_mask_path') else 'bbox',
-                  'result_json_path': str(output_json_path)}
+                  'result_json_path': str(output_json_path), 'inference_cache_hit': False}
         output = Path(output_json_path)
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(result, indent=2))
         self.last_run = root
+        self._candidate_cache[cache_key] = deepcopy(result)
+        while len(self._candidate_cache) > 4:
+            self._candidate_cache.popitem(last=False)
         return result
 
     def save_geometry(self, plan):

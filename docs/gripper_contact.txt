@@ -79,7 +79,7 @@ Robotiq 2F-85 独立接触后限位实验
   contact.source=native: 夹爪自身报告闭合接触。
   closure_after_contact_raw: 从首次判定接触样本到停止确认时已闭合多少格。
   overshoot_raw: 相对追加位移目标超出的格数，若无追加目标则不适用。
-  current_limit: 达到绝对电流上限，不当作接触成功。
+  current_limit: 达到绝对电流上限，不当作接触成功；正式 Agent 在确认停止后计为闭合完成。
   travel_limit_no_contact: 到达总行程限制，未观察到接触。
 
 仅重新绘图（完全离线，不读取硬件配置，不连接串口）
@@ -107,6 +107,12 @@ Robotiq 2F-85 独立接触后限位实验
     force_raw: 0
     max_close_raw: 225
   上述参数延续已有实验，追加位移按用户要求从 2 改为 3。
+  2026-10-22 更新：用户确认实际夹持成功后，将本机 extra_close_raw 从 3 调回 2；
+  current_limit_ma=100 及其余参数保持原值，已校验与现有空载基线兼容。
+  当次记录为接触位置 126、实际闭合至 128、电流达到 100 mA；current_limit 优先于
+  固件接触完成判断，旧适配器因此向 Agent 报错。未到目标 129 不是独立失败条件。
+  改为 2 后目标位置为 128，但实际运动/电流需重测。
+  同日用户进一步要求：保留达到电流上限后的停止，取消将该停止判为抓取失败。
   停止仍可能超调，报告中的 closure_after_contact_raw / overshoot_raw 记录实际结果。
   打开动作仍用原硬件 YAML 中的 speed_raw / force_raw，不改闭合基线的条件。
 
@@ -118,13 +124,20 @@ Robotiq 2F-85 独立接触后限位实验
   更换指尖/安装或改闭合运动条件后，应重新实验并显式更新 baseline_file 指向的文件。
 
   原有 Agent 启动命令可继续使用，需退出旧进程再启动以加载新驱动和参数。
+  2026-10-22：正式 Agent 将该驱动及其接触策略整体放入独立通信进程，
+  防止感知主进程占用 Python 解释器锁时阻塞轮询；100 mA / extra_close_raw=2 等参数不变。
+  原 0.5 s 状态超时和故障锁定保留，独立实验入口不变；详见 docs/gripper_process.md。
   完整任务还是：视觉/抓取位姿 -> MoveIt 接近 -> 接触限位闭合 -> 抬升/搬运 -> 放开。
   不改物体检测、SAM3、AnyGrasp、手眼变换、TCP、MoveIt 或技能规划。
   当前用户设置仍允许“走到闭合行程终点但没检测到接触”后继续；不新增接触必需门槛。
-  电流上限/通信异常/超时/未确认停止仍是错误，阻止本次抬升，不自动补夹或重试。
+  正式 Agent：达到电流上限仍立即停止；停止已确认、设备健康且无通信/停止错误时，
+  close_completed() 返回真，允许继续既有抬升/搬运。日志保持 outcome=current_limit、
+  stop_confirmed=true、completed=true、grasp_verified=false；不要求到达原位置目标。
+  通信异常/设备故障/超时/未确认停止仍是错误，不自动补夹或重试。
 
   新驱动保持真实 gGTO=0，不伪造接触。Agent 用 close_completed() 判断命令完成。
   may_be_holding_object() 仅用于任务结束时保留手动释放终端，不能证明抓稳。
+  电流限停也保留这个持物提示，因为硬上限可能早于接触检测触发；不会伪造接触记录。
   抓取日志 runs/agent_gripper_contact/<时间>-<ID>.json；不在闭合过程中生成图，避免延迟。
   需要图时可离线执行：
     bash test_gripper_contact.sh --plot '/绝对路径/agent_gripper_contact/实验.json'
@@ -136,6 +149,7 @@ Robotiq 2F-85 独立接触后限位实验
     hardware/config.py / runtime.py  配置路径解析、驱动选择和离线预检
     agents/simple_execution_runtime.py  完成回调与退出时的持物提示，技能流程不改
   原始 hardware.cli gripper 和独立 GSNet 诊断脚本继续使用原始协议驱动；正式 Agent 走新驱动。
+  本次仅修改正式 Agent 的完成语义；独立实验仍记录 current_limit，原始协议驱动的异常语义保留。
   将 gripper.contact_close_file 设为 null 可显式恢复正式 Agent 的原始闭合驱动。
 
   离线验证：151 项通过，包含模拟 Modbus 与 Agent 闭合后抬升调用链；未访问设备。

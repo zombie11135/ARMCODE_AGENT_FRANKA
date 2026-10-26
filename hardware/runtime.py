@@ -97,6 +97,9 @@ def build_hardware(path=None, *, execute=False, stack=None, speed_scaling=None, 
     if cfg.gripper.contact_close_file:
         from .robotiq_contact import AgentContactGripper
         gripper_type = AgentContactGripper
+    if agent:
+        from .gripper_process import ProcessGripper
+        gripper_type = ProcessGripper
     return Hardware(cfg, FrankaMoveItArm(cfg.arm, stack=stack, execution_enabled=execute),
                     gripper_type(cfg.gripper, execution_enabled=execute), transforms)
 
@@ -172,15 +175,44 @@ def apply_cli_profile(args):
 
 
 def run_fr3_builtin(operation, args):
+    if operation == 'home':
+        return _run_fr3_home(args)
     hw = build_hardware(args.hardware_config, execute=args.execute_robot,
                         speed_scaling=getattr(args, "arm_speed_scaling", None), agent=True)
     try:
-        if operation == "home" and hw.config.arm.home_pose is None:
-            raise RuntimeError("arm.home_pose 尚未配置；请先通过 hardware.cli 测试法兰位姿")
         if not args.execute_robot:
             print(f"[builtin] FR3/Robotiq {operation}: dry-run；需 --execute_robot 才执行")
             return
-        result = hw.arm.home() if operation == "home" else getattr(hw.gripper, operation)().to_dict()
+        result = getattr(hw.gripper, operation)().to_dict()
         print(result)
     finally:
         hw.disconnect()
+
+
+def _run_fr3_home(args):
+    """Use the task's home without constructing cameras, grasp models or grippers."""
+    from runtime.home_pose import home_pose_session
+    cfg = load_config(args.hardware_config)
+    session = home_pose_session(args)
+    if not args.execute_robot:
+        target = session.known_pose(args.hardware_config) or cfg.arm.home_pose
+        print('[builtin] FR3 home（基座系法兰 m/rad）:', target if target is not None else '首次真机任务/首次 home 时记录')
+        print('[builtin] dry-run；未加 --execute_robot，不读取机械臂或执行移动。')
+        return
+    settings = replace(cfg.arm, singularity_screening='advisory')
+    speed = getattr(args, 'arm_speed_scaling', None)
+    if speed is not None:
+        settings = replace(settings, speed_scaling=speed)
+    arm = FrankaMoveItArm(settings, execution_enabled=True)
+    try:
+        target, recorded = session.resolve(args.hardware_config, cfg.arm.home_pose,
+                                           lambda: arm.get_pose().values)
+        print('[builtin] FR3 home（基座系法兰 m/rad）:', target, 'source='+session.source)
+        if recorded and cfg.arm.home_pose is None:
+            print('[builtin] 已将当前实际法兰位姿记录为本会话 home；本次无需移动。')
+            return
+        result = arm.move_pose(Pose6D(*target))
+        print('[builtin] home completed:', result)
+        return result
+    finally:
+        arm.close()

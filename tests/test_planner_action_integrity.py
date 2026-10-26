@@ -43,6 +43,14 @@ def test_saved_incomplete_graph_is_rejected_instead_of_silently_skipped():
         SimpleCodeGenerator().build_actions(PlanGraph.from_dict(failed_graph()))
 
 
+def test_macro_only_plan_cannot_generate_an_empty_success_script():
+    data = failed_graph()
+    data["nodes"] = data["nodes"][:1]
+    data["edges"] = []
+    with pytest.raises(ValueError, match="没有可执行动作"):
+        SimpleCodeGenerator().build_actions(PlanGraph.from_dict(data))
+
+
 def test_no_new_grasp_is_invented_for_observe_then_place():
     data = failed_graph(); data['nodes'] = [n for n in data['nodes'] if n['node_id'] != 'n2']
     data['edges'] = [dict(source='n0', target='n1'), dict(source='n1', target='n3')]

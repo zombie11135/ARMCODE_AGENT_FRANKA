@@ -61,9 +61,9 @@ class PoseSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan([steep], fallback_to_raw_when_no_good=True)
 
-    def test_roll_wrap_and_unpenalized_yaw_do_not_rotate_candidate(self):
+    def test_roll_wrap_and_disabled_pose_fix_do_not_rotate_candidate(self):
         candidate = self.candidate(0, .8, tilt=.01, yaw=.8)
-        plan = self.plan([candidate], max_rx_tilt_deg=1.)
+        plan = self.plan([candidate], max_rx_tilt_deg=1., enable_pose_fix=False, lam_rz=0.)
         self.assertAlmostEqual(plan['pose_selection']['chosen_candidate']['tilt_rx_rad'], .01)
         np.testing.assert_allclose(plan['selected']['rotation_matrix'], candidate['rotation_matrix'])
         self.assertAlmostEqual(plan['best_grasp_base_mrad'][5], .8)

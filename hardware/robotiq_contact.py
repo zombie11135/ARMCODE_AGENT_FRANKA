@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from .gripper_contact import ContactExperimentGripper, ContactSettings, EmptyBaseline
-from .robotiq import GripperCurrentLimitError, GripperError
+from .robotiq import GripperError
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ def load_contact_close_setup(config):
 
 class AgentContactGripper(ContactExperimentGripper):
     NORMAL_COMPLETION = frozenset(('contact_travel_limit', 'contact_target_reached',
-                                   'native_contact', 'travel_limit_no_contact'))
+                                   'native_contact', 'travel_limit_no_contact', 'current_limit'))
 
     def __init__(self, config, *, execution_enabled=False, serial_factory=None):
         self.contact_setup = load_contact_close_setup(config)
@@ -92,16 +92,15 @@ class AgentContactGripper(ContactExperimentGripper):
             report = self.run_trial(setup.settings, baseline=setup.baseline,
                                     mode='grasp', output_dir=setup.output_dir)
             outcome = report['outcome']
-            if outcome == 'current_limit':
-                raise GripperCurrentLimitError(f'Robotiq contact close reached current ceiling '
-                    f'{setup.settings.current_limit_ma} mA; stopped; log: {report["log_path"]}')
-            if outcome not in self.NORMAL_COMPLETION or not report.get('stop_confirmed'):
+            if (outcome not in self.NORMAL_COMPLETION or not report.get('stop_confirmed')
+                    or report.get('error') or report.get('stop_error')):
                 raise GripperError(f'Robotiq contact close failed: {outcome}; log: {report["log_path"]}')
             state = self.assert_healthy(require_ready=True)
             if state.go_to:
                 raise GripperError(f'Robotiq contact close stop not reflected in status; log: {report["log_path"]}')
-            # Preserve existing Agent semantics: completed empty travel is not an
-            # error, and contact is not proof of a retained object.
+            # A confirmed current-limited stop completes this close command.
+            # Keep outcome=current_limit and grasp_verified=False in telemetry;
+            # command completion does not prove contact or object retention.
             self._contact_close_completed = True
             return state
         finally:
@@ -122,8 +121,10 @@ class AgentContactGripper(ContactExperimentGripper):
 
     def may_be_holding_object(self):
         # gOBJ is invalid after rGTO=0. Retain the observed contact only as a
-        # cleanup hint so early task exit can still offer the manual hold console.
+        # cleanup hint. Current limiting can precede a recorded contact, so it
+        # also preserves the existing manual release console on task exit.
         state = self._last_status
         return bool(self._contact_close_completed and self.last_contact_close
-                    and self.last_contact_close.get('contact') is not None
+                    and (self.last_contact_close.get('contact') is not None
+                         or self.last_contact_close.get('outcome') == 'current_limit')
                     and state is not None and state.ready and not state.go_to)

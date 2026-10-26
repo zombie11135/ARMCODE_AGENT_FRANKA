@@ -16,6 +16,7 @@ def build_scene_memory_from_simple_robot(
     gripper_holding: str | None = None,
     probe_counts: dict[str, int] | None = None,
     searched_regions: set[str] | None = None,
+    geometry_prepared_target: str | None = None,
 ) -> SceneMemory:
     """Build SceneMemory from SimpleRobotActions runtime caches.
 
@@ -33,6 +34,7 @@ def build_scene_memory_from_simple_robot(
                 target=target,
                 observation=observation,
                 in_gripper=(gripper_holding == target),
+                geometry_prepared=(target == geometry_prepared_target),
             )
             objects[state.object_id] = state
         elif kind == "container":
@@ -75,6 +77,7 @@ def medicine_observation_to_object_state(
     target: str,
     observation: dict[str, Any],
     in_gripper: bool = False,
+    geometry_prepared: bool = False,
 ) -> ObjectState:
     """Convert one cached medicine observation into an ObjectState."""
 
@@ -148,7 +151,8 @@ def medicine_observation_to_object_state(
 
     visible = bool(bbox or selected)
     reachable = bool(visible and (has_depth or has_grasp_pose))
-    occlusion_level = _estimate_occlusion_level(selected, grasp_input, vlm_occlusion)
+    occlusion_level = _estimate_occlusion_level(
+        selected, grasp_input, vlm_occlusion, use_heuristics=not geometry_prepared)
     graspable = bool(visible and (bbox or has_grasp_pose))
     if vlm_occlusion and not bool(vlm_occlusion.get("grasp_safe", True)):
         graspable = False
@@ -245,6 +249,9 @@ def container_plan_to_object_state(
     semantic_score = color_score if color_score is not None else detector_confidence
     if object_type in {"plate", "container"}:
         semantic_score = max(float(semantic_score or 0.0), 0.6)
+    binding = _as_dict(plan.get('task_container'))
+    fixed_for_task = bool(binding.get('fixed_for_task') is True and binding.get('task_id')
+                          and binding.get('coordinate_frame') == 'base' and has_pose)
 
     return ObjectState(
         object_id=str(object_id),
@@ -261,6 +268,7 @@ def container_plan_to_object_state(
         in_gripper=False,
         free_space=free_space,
         placeable=has_pose,
+        fixed_for_task=fixed_for_task,
     )
 
 
@@ -338,6 +346,7 @@ def _estimate_occlusion_level(
     selected: dict[str, Any],
     grasp_input: dict[str, Any] | None = None,
     vlm_occlusion: dict[str, Any] | None = None,
+    *, use_heuristics: bool = True,
 ) -> float:
     vlm_occlusion = _as_dict(vlm_occlusion)
     if vlm_occlusion:
@@ -351,6 +360,12 @@ def _estimate_occlusion_level(
         return clamp01(selected.get("occlusion_level"))
     if not selected.get("bbox"):
         return 1.0
+    if not use_heuristics:
+        # The current grasp preflight has already validated this target's
+        # same-frame relation graph. Bbox depth spread / mask occupancy are
+        # not independent evidence of occlusion and must not veto that result.
+        # Explicit selected/VLM occlusion verdicts above remain in effect.
+        return 0.0
 
     grasp_input = _as_dict(grasp_input)
     evidence_scores: list[float] = []

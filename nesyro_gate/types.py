@@ -66,6 +66,7 @@ class ObjectState:
     identity_source: str | None = None
     identity_match_score: float = 0.0
     identity_verified: bool = False
+    fixed_for_task: bool = False
 
 
 @dataclass

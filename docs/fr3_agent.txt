@@ -28,6 +28,54 @@ gate 和任务重规划接口保留。只替换 FR3 模式下的抓取后端、�
 默认不发送运动；dry-run 仍需相机和只读真实法兰反馈，不能用假硬件 FK 配真实照片。
 LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账号或密钥。
 
+多目标任务（2026-10-23）
+  支持：将西瓜霜放到蓝色盘子中，将抗病毒口服液放到粉色盘子中。
+  保留每一项的物体与容器对应关系，生成 grasp(西瓜霜) -> place(blue tray)
+  -> grasp(抗病毒口服液) -> place(pink tray)，开始抓取前预观测这两个容器。
+  LLM 只返回文字 macro 节点、遗漏目标或分错指定容器时，会展开为完整对应动作。
+  coder 和执行器拒绝空动作计划；空列表不会启动执行会话或被报告为完成。
+  更新后需退出旧 Agent，使用原启动命令重启，再输入上述任务。
+
+Gate 与同会话任务修复（2026-10-23）
+  几何抓取准备已通过当前目标的同帧图验证时，Gate 不再用 bbox 深度跨度、
+  掩码占框比例等旧启发式再次判定目标遮挡。显式 VLM/目标遮挡结论仍保留。
+  trace 记录 occlusion_evidence_source=validated_wrist_relation_graph。
+  几何模式下，抓取尚未启动且空手时的 nesyro_gate_replan/probe_exhausted 可修复：
+  注入失败约束 -> 生成带观察的剩余动作 -> 新观测 -> 再次 Gate -> 抓取/放置。
+  沿用同一个机器人、容器计划、清障次数与缓冲位占用，跳过已经完成的抓放。
+  默认最多一次，受 --max_replan_attempts、--no_replan、--no_resume_from_failure 控制。
+  该修复使用现有约束重规划器和确定性 coder；未新增任务级 LLM 重规划调用。
+  清障预算/槽位耗尽、明确暂停、运动或夹爪故障、持物放置失败不自动重试。
+  automatic_replan=false 仍禁止外层重建执行会话；same_session_replan 记录内部修复。
+  当前进程结束后重新输入任务属于新任务，不自动继承上一任务的执行进度。
+
+首帧感知流水线（2026-10-23）
+  原 Agent 启用 --enable_geometry_occlusion 时默认启用，不改变启动命令或 planner/coder 接口。
+  首次回到 home 并采集 RGB-D 后，主线程冻结图像、SDK 点云、内参和拍摄位姿，
+  随即后台处理第一个待抓目标：身份识别 -> SAM3 关系图 -> 目标或上游遮挡物的抓取候选。
+  同时主线程继续容器定位、二次观测移动和返回 home；不再追加一次重复的 home 运动请求。
+  返回后接收后台结果；未完成时只等待余下计算。正常抓取仍执行同帧验证、最终姿态选择、
+  RZ 等价姿态恢复和原 MoveIt 运动规划。后台没有相机、机械臂或夹爪接口，不执行动作。
+  候选缓存按同帧点云/RGB、内参、掩码、ROI、拍摄位姿、模型选项、场景版本和桌面配置匹配；
+  只复用模型候选，不直接复用已选运动目标。缓存最多保留 4 项，失败推理不缓存。
+  首帧计算可以长于普通图像缓存的 30 秒 TTL：仅本轮注册的流水线帧按任务/观测 epoch 有效，
+  不修改实际拍摄时间；仍检查来源、标定 scope 和返回位姿。抓取/放置/清障、新任务或主动
+  刷新使其失效，改变物体后重新拍摄。普通观测缓存原有效期不变。
+  单 GPU 模型调用保持互斥，SAM3 锁缩小到单次窗口推理，CPU 关系分析/文件处理不再占整段
+  GPU 锁；主要重叠的是计算与容器观测移动，不保证 SAM3 与 AnyGrasp 同时占用 GPU。
+  本版只预处理首个待抓目标；后续目标受前序物理操作影响，继续从新场景观察，避免执行旧图。
+  若 LLM 选择了不同的合法遮挡物，使用其真实掩码正常计算，未命中的预计算不改变动作选择。
+  日志：
+    [perception_pipeline] first-frame analysis started for ...
+    [perception_pipeline] published ... join_wait_s=...
+    [perception_pipeline] anygrasp candidate cache hit; inference skipped
+  gate_trace.jsonl 同目录下 perception_pipeline.json 记录 analysis_s、candidate_prefetch_s、
+  elapsed_before_join_s、join_wait_s、首帧实际年龄和发布/丢弃原因。标准路径为
+  runs/current_plan/perception_pipeline.json。join_wait_s 越小，返回后剩余等待越少。
+  用同一原启动命令添加 --disable_perception_pipeline 可关闭流水线，比较任务总耗时和抓取前等待。
+  首次模型加载、GPU 竞争或容器移动短于推理时间时仍可能等待，实际节省时间需要真机测量。
+  本轮仅做无设备并发/闭环/候选缓存回归，未启动相机或执行机械臂动作。
+
 双视角相机（已替换旧 D455）
   global：Intel RealSense D435i，序列号 346522072096，高处固定俯瞰。
     沿用原 D455 的 global 接口，提供 RGB 场景全貌，供 VDM/VLM 和放置前后对比使用。
@@ -35,7 +83,9 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
     提供对齐 RGB-D、SDK 点云和拍摄时法兰位姿，用于抓取推理和手眼坐标转换。
   FR3 入口从 YAML 按序列号绑定，不按 USB 枚举顺序或相机型号猜测角色。
   原 --use_vdm / VLM 设置继续有效；无需增加新相机参数，重启 agent 即可加载配置。
-  当前两台相机均为 USB 2.1，沿用已验证的 640x480、6 fps 配置。
+  2026-10-23：当前采集配置改为 1280x720、6 fps，RGB 与深度流使用相同分辨率。
+  本机只读 SDK 查询显示两台相机当前均为 USB 3.2，均上报 1280x720@6 的 BGR8/Z16 模式。
+  内参读取实际流及对齐后的深度帧；本次未启动新模式取流，重启 Agent 后加载配置。
   俯瞰相机目前只参与图像观察；未设置它到基座的外参，不从该视角直接计算机械臂目标。
   实际取图验证：runs/camera_roles/20261013-215121/report.json，两路相机正常。
   此次只测试相机，未访问机械臂或夹爪；诊断用腕部图像没有绑定机器人位姿，不能直接执行抓取。
@@ -62,12 +112,13 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
   SDK 和权重使用 config/hardware/fr3.yaml 的 anygrasp_dir / anygrasp_ckpt / anygrasp_python。
   保留检测 bbox/SAM mask；全场景点云做推理和碰撞筛选，再对全部幸存候选做基座系姿态筛选。
   不先按原始分数截断候选或做 NMS。最终只返回一个选中的姿态。
-  不额外旋转 180°，不套用旧 xArm 抓取姿态修正或高度补偿。
+  平行夹爪在同一抓取的两个 180° 等价姿态中优先选择 RZ 接近 -1.57 的姿态；
+  使用完整标定链重新计算法兰目标，不套用旧 xArm 的高度补偿。
   使用 T_base_flange(capture) * T_flange_camera * T_camera_grasp * T_grasp_tcp，
   再乘 inv(T_flange_tcp) 得到 MoveIt 的 fr3_link8 目标。
   预抓取沿接近方向后退 8 cm；Robotiq 正常闭合完成后，从实际法兰反馈沿基座 Z 抬高 5 cm。
   全部移动依旧允许 MoveIt 绕行，不保证直线路径。桌面和整套工具碰撞包络保持启用。
-  当前 TCP 沿法兰 +Z 160 mm；额外桌面余量为 0 mm，工具 padding 仍为 5 mm。
+  当前 TCP 沿法兰 +Z 150 mm（2026-10-23 用户调整）；额外桌面余量为 0 mm，工具 padding 仍为 5 mm。
   工具总长按用户重新测量改为 170 mm；含 padding 的碰撞包围盒为 110 × 110 × 175 mm。
   grasp_table_clearance_check=false：不以抓取中心高度或工具包围体间隙淘汰候选。
   工具最低高度仍写入诊断；通过候选筛选不代表通过 MoveIt 碰撞检查。
@@ -77,17 +128,29 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
   指 fr3_link0 中 fr3_link8 法兰 Z=300 mm，在 TCP 转法兰后设置；X/Y 仍对准视觉容器中心。
   接近、释放后抬升各高出 120 mm，默认法兰 Z=420 mm；目标姿态沿用原放置设置。
   此时 place_clearance_mm 不决定释放高度。设 place_flange_z_m: null 可恢复容器相对高度。
-  与已验证的一键抓取一样，奇点指标作记录，不另加终点奇点筛选或翻转候选。
+  奇点指标作记录，不另加终点奇点筛选；180° 等价姿态按下述 RZ 偏好选择。
 
 夹爪与 home
   --execute_robot 才会建立执行会话；未激活时先激活，再按任务执行开合。
+  2026-10-22：正式 Agent 的夹爪串口、轮询和接触闭合策略已移到独立进程，避免
+  主进程感知占用 Python 解释器锁时中断状态更新。原启动参数不变，需退出旧进程后重启。
+  启动输出 [FR3] 夹爪通信: process worker_pid=... state_timeout_s=0.5。
+  原状态超时/故障锁定仍有效，不自动重连或重试；诊断与离线验证见 docs/gripper_process.md。
   后台保持串口轮询；通信异常会取消当前运动，运动失败不会继续闭合或自动恢复。
   按用户要求，Agent 不再以 closing contact 决定是否抬升/搬运；闭合完成即继续。
   gOBJ=2（闭合接触）与 gOBJ=3（到达位置）均可继续；通信、故障、动作完成检查保留。
   执行日志保留实际 contact_detected，并标明 contact_required=false；闭合完成不代表确认抓住物体。
   任务结束若仍夹持，进入 status/open/stop/quit 保活终端，不会自动张开。
-  YAML home_pose 为 null 时，本轮启动时的实际法兰姿态用作本轮 home；不会使用 xArm home。
-  独立 /home 命令仍需显式配置固定 home_pose。
+  2026-10-23：任务内部 home 与交互 home / /home / 回到初始位置统一为本会话的同一个位置。
+  首次任务开始时，优先使用 YAML arm.home_pose；为 null 时读取实际法兰位姿并记录。
+  后续任务和交互 home 复用这一位置；任务失败不会把失败时的停留位置重新定义为 home。
+  同一 CLI 进程通过 home_pose_session 共享记录，不保存到 YAML 或磁盘，不使用旧 xArm 坐标。
+  如果尚未开始过任务、也未配置固定 home，第一次输入 home 会读取并记录当前位置，
+  打印“本次无需移动”；此后 home 才会返回该位置。退出进程或更换硬件配置后重新建立记录。
+  交互 home 仅构建机械臂接口，不加载标定/模型、不建立夹爪通信，也不自动开合夹爪。
+  --execute_robot 才允许读取并执行该交互命令；dry-run 只显示已知目标，不读取硬件或移动。
+  FR3 的速度参数、当前状态起点规划和运动端点检查保持生效，失败只报告一次，不自动重试。
+  独立 hardware.cli arm home 仍要求 YAML 中显式配置 home_pose；它没有 Agent 会话记录。
   放置任务保留原容器识别与高度策略，释放目标通过 TCP 转法兰；清障缓冲位等用户指定
   mm/rad 位姿在 FR3 中表示基座系法兰位姿，需按本机工作区设置，不能照搬另一台机械臂。
 
@@ -98,7 +161,9 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
   每次动作打印 JSON 日志路径；session_info.last_motion_feedback 保存摘要。
   close_current_limit_ma: null 表示只记录，尚未启用主机端电流阈值停止。
   标定后填写 10..2550 的整数（10 mA 的倍数）；不提供未经测量的默认停止阈值。
-  达到阈值会发送 rGTO=0 并确认停止，抛出 GripperCurrentLimitError，中止抬升/运输。
+  原始协议驱动达到阈值会发送 rGTO=0 并确认停止，抛出 GripperCurrentLimitError。
+  正式 Agent 的接触闭合适配器于 2026-10-22 按用户要求调整：电流限停已确认且设备健康时
+  记为闭合完成，可继续抬升/运输；保持 current_limit 日志，不将其等同于抓稳验证。
   不自动张开、不自动重试、不把电流上升伪装成夹持成功；停止后的 gOBJ 不用于接触判断。
   未触发电流保护且闭合正常完成时，Agent 不再要求原生 closing contact 才抬升。该保护只作用于本驱动发出的闭合
   动作，不是搬运中的恒力控制，也不取代夹爪内部控制。默认前台状态采样约 50 ms，
@@ -131,6 +196,9 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
   FR3 主入口默认开启 --visualize_selected_grasp；AnyGrasp 使用原生 Open3D 展示点云和最终一个抓取。
   显示的是姿态筛选/综合评分后真正选中的候选，与执行目标对应；控制台同时输出目标法兰位姿。
   用 --no-visualize-selected-grasp 可关闭每次抓取前的预览。
+  2026-10-23：腕部遮挡分析会对未被完整候选覆盖的触边片段自动扩大裁剪，
+  用原类别加 cube/block 重新分割，再提取深度关系；无需新增启动参数。
+  小方块遮挡药盒的真实照片离线结果与流程见 docs/occlusion_crop_recovery.md。
   若启用了 --execute_robot，关闭可视化窗口后继续已选任务的执行。
   runs/agent_anygrasp/<id>/ 保存本次点云、mask、模型日志、最终选中抓取和转换后的目标。
   离线查看：bash run_anygrasp_offline.sh view runs/agent_anygrasp/<id> --stage selected
@@ -140,26 +208,33 @@ LLM/API 的配置保持原有环境变量和命令行方式，本次未更改账
 
 本次验证只使用保存图像、合成轨迹和模拟设备调用。完整 agent 的现场任务仍由操作者运行。
 
-FR3 姿态筛选（2026-10-13）
+FR3 姿态筛选（2026-10-23 更新 RZ 等价姿态恢复）
   姿态为 fr3_link0 中标定转换后的 fr3_link8 RPY；当前 TCP 坐标轴与法兰平行。
-  默认目标 rx=pi、ry=0，rx/ry 周期角偏差各不超过 65 度，不约束 rz。
-  综合分 = 当前模型原始分 - lam_rx * rx偏差(弧度) - lam_ry * ry偏差(弧度)。
-  默认 lam_rx=lam_ry=1。先应用姿态约束，再按综合分排序；当前关闭候选桌面间隙检查。
+  默认目标 rx=pi、ry=0、rz=-1.57；rx/ry 周期角偏差各不超过 65 度，rz 为偏好。
+  每个候选评估原姿态和绕模型接近轴 X 旋转 180° 的等价姿态，保持抓取中心、
+  接近方向和无向夹持轴不变。两种姿态均经标定转换与原姿态/桌面筛选，再选靠近目标 RZ 者。
+  综合分 = 当前模型原始分 - lam_rx * rx偏差 - lam_ry * ry偏差 - lam_rz * rz偏差（均为弧度）。
+  默认 lam_rx=lam_ry=1、lam_rz=0.25。先应用姿态约束，再按综合分排序；当前关闭候选桌面间隙检查。
   默认 best_good：选择综合分最高者。随机模式也只从满足全部约束的候选中选。
   在原启动命令后追加：
     --grasp-selection-mode random_top_k_good --grasp-random-select-top-k 5
   加 --grasp-random-seed 42 可对同一候选池复现随机选择。
-  可调 --grasp-target-rx / --grasp-target-ry（弧度），
+  可调 --grasp-target-rx / --grasp-target-ry / --grasp-target-rz（弧度），
        --grasp-max-rx-tilt-deg / --grasp-max-ry-tilt-deg（度），
-       --grasp-lam-rx / --grasp-lam-ry（非负惩罚系数）。
-  不旋转或修正候选，不在没有合格候选时退化成原始最高分；MoveIt 检查仍然执行。
+       --grasp-lam-rx / --grasp-lam-ry / --grasp-lam-rz（非负惩罚系数）。
+  --no-grasp-pose-fix 关闭 180° 等价姿态选择；再加 --grasp-lam-rz 0 可复现原先不偏好 yaw 的筛选。
+  不将任意抓取硬改为 RZ=-1.57；物体夹持方向要求的角度偏差仍保留。MoveIt 检查继续执行。
   anygrasp/filtered_candidates.npy（GSNet 为 gsnet/）保存点云筛选后的完整池；pose_selection.json 保存逐候选
-  角度偏差、综合分、姿态/桌面合格状态、随机池和最终选择。grasps.npy/json 和可视化
+  角度偏差、综合分、姿态/桌面合格状态、随机池、两种等价姿态和 jaw_symmetry_flipped。
+  source_rotation_matrix 保留模型原始方向；grasps.npy/json 和可视化
   始终只指向最终选中的一个抓取。此逻辑不会解决上游碰撞筛选已将候选清零的情况。
   保存点云离线回放：runs/pose_selection_validation/20261013T150501/summary.json。
   318 个通过点云筛选的候选中有 294 个通过姿态/工具间隙检查；默认综合评分选择
   从原始分最高的 index 23 改为 index 97，roll 偏差由 27.74 度降为 13.41 度。
   该回放只读取旧数据，不代表当前桌面目标；没有查询或控制设备。
+  2026-10-23 RZ 回放：保存的 54 个 AnyGrasp 候选中，index 30 的 RZ 从 +1.614
+  选择为等价的 -1.528；抓取中心、接近方向和无向夹持轴不变，XYZ 不变。
+  证据：runs/grasp_yaw_replay/20261023-163218/summary.json。回放仅使用历史标定，未改当前 TCP。
 
 验证记录
   conda pytest：194 项通过（排除缺少既有 pybullet 依赖的 test_gate_sim.py）。
@@ -198,9 +273,12 @@ SAM3 权重接入验证（2026-10-13）
   固定读取 config/calibration/robotiq_contact_baseline.json，不再每轮手动 baseline。
   原启动命令不变，重启 Agent 生效。不要同时运行占用串口的夹爪实验终端。
   上层通过 close_completed() 接受新方法的主动停止，不要求停止后的 gGTO 仍为 1。
-  保留当前不强制接触确认的任务行为；电流超限或通信故障仍会阻止抬升。
+  保留当前不强制接触确认的任务行为；电流限停确认后允许抬升，通信故障或停止未确认仍失败。
   runs/agent_gripper_contact/ 保存电流/位置 JSON，可用 test_gripper_contact.sh --plot 离线绘图。
   参数、基线来源、各修改文件、恢复旧驱动的方法见 docs/gripper_contact.txt 末尾。
+  2026-10-22 本机更新：extra_close_raw=2，电流上限仍为 100 mA，其余参数不变。
+  原配置与离线基线校验结果保存在 runs/gripper_parameter_updates/20261022_203515/。
+  新参数在重启 Agent 后生效；本次修改未连接设备或重新执行抓取。
 
 2026-10-21 腕部单相机与按观测位姿复用
   当前 config/hardware/fr3.yaml 设置 cameras.mode: wrist，只启动腕部 D435i。
@@ -276,7 +354,8 @@ SAM3 权重接入验证（2026-10-13）
     抓取、放置、清障的底层执行函数统一进入 scene_mutation：
       获取共享设备锁 -> 推进版本并标记执行中 -> 执行 -> finally 再失效并退出执行中。
     操作失败、异常、调用方绕过 SimpleRobotActions 直接调用这些底层执行函数，仍覆盖此路径。
-    物理操作导致失效时，通过弱引用回调同步清理 robot.observations 与 robot.place_plans；
+    物理操作导致失效时，通过弱引用回调同步清理动态目标观测和未登记的放置计划；
+    按 2026-10-22 的任务约定，容器基座位置在一个任务内固定，首次成功定位的计划保留。
     保留任务进度和放置数量。仅强制重拍不会把清障正在使用的输入证据提前清掉。
 
     感知工作可以在后台继续，但只能返回局部结果。写入 Agent 状态之前必须原子检查：
@@ -285,8 +364,10 @@ SAM3 权重接入验证（2026-10-13）
     旧的成功结果返回 stale_observation，旧的失败结果也不能清空新代次观测。
     last_wrist_capture 改为线程局部变量，防止 A 任务误用 B 任务的图片位姿。
     采集过程中若发生外部显式失效，也会拒绝返回该帧。
-    抓取计划携带来源观测代次，执行入口再次校验；容器基座放置计划校验 scene_epoch，
-    允许在场景未变时拍摄放置前验证图，但不能跨物理场景变更继续使用旧计划。
+    抓取计划携带来源观测代次，执行入口再次校验；普通未登记的放置计划校验 scene_epoch。
+    本任务已登记的固定容器计划改验任务 ID 和原有位姿，允许跨抓取/清障的场景版本使用；
+    不再重复观察容器或用 OCR 要求阻拦放置。new_task 会清除这些固定计划并重新定位。
+    详见 docs/task_fixed_containers.md。
 
     相机 RGB-D/FK 绑定与物理执行共用设备锁；FR3 旧位姿适配器也使用该锁。
     相机不会与这些 Agent 运动入口交叉采集。纯观察点移动不会主动使整个静态桌面失效。

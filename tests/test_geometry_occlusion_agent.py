@@ -22,12 +22,14 @@ from skill_lib.actions.geometry_occlusion import prepare_grasp, validate_prepare
 class ShapeBackend:
     checkpoint = Path('mock_shapes_not_a_model')
     confidence = .35
+    target_right = 60
+    blocker_bottom = 55
 
     def predict(self, image, prompts, **kwargs):
         x, y = image[:, :, 0], image[:, :, 1]
         blocked = image[0, 0, 2] == 0
-        back = (x >= 10) & (x < 60) & (y >= 10) & (y < 50)
-        front = (x >= 25) & (x < 45) & (y >= 20) & (y < 55)
+        back = (x >= 10) & (x < self.target_right) & (y >= 10) & (y < 50)
+        front = (x >= 25) & (x < 45) & (y >= 20) & (y < self.blocker_bottom)
         masks = [back & ~front, front] if blocked else [back]
         rows = []
         for index, mask in enumerate(masks):
@@ -101,6 +103,7 @@ def rig(tmp_path, monkeypatch):
         return SkillResult(True, dict(selected_instance=dict(object_id='target_identity',
             bbox=[10, 10, 60, 50], confidence=.99, ocr_text='target'),
             selection_result=dict(score=.99, ranked_candidates=[]), image_path=kwargs['image_path']))
+    real_recognize = FindAndGraspMedicineSkill._recognize_image
     monkeypatch.setattr(FindAndGraspMedicineSkill, '_recognize_image', recognize)
     def plan(skill, grasp_input, **kwargs):
         plans.append(deepcopy(grasp_input))
@@ -139,11 +142,71 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(robot, 'home', lambda: SkillResult(True))
     monkeypatch.setattr(robot, 'log_gate_outcome', lambda **kwargs: None)
     return SimpleNamespace(robot=robot, camera=camera, service=service, events=events, plans=plans,
-                           recognize=recognize, root=tmp_path)
+                           recognize=recognize, real_recognize=real_recognize, root=tmp_path)
+
+
+@pytest.mark.parametrize('registered', [True, False])
+def test_mobileclip2_identity_drives_geometry_agent_without_ocr(rig, monkeypatch, registered):
+    """Exercise the real identity/graph bridge; encoder and all actuators are mocks."""
+    from PIL import Image
+    from services.object_reference_service import ObjectReferenceService, ReferenceSettings
+    from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+
+    class Encoder:
+        def encode(self, images, batch_size=16):
+            features = np.zeros((len(images), 512), np.float32)
+            features[:, 0] = 1.
+            return features
+
+    checkpoint = rig.root/'mock_mobileclip2.pt'
+    checkpoint.write_bytes(b'not-a-real-checkpoint')
+    references = ObjectReferenceService(ReferenceSettings(
+        gallery_dir=str(rig.root/'gallery'), checkpoint=str(checkpoint), device='cpu',
+        log_dir=str(rig.root/'recognition_logs'),
+        encoder_model='mobileclip2_b', recognition_policy='reference_only',
+        min_similarity=.8, min_class_margin=.02), encoder=Encoder())
+    reference = rig.root/'reference.png'
+    Image.new('RGB', (50, 40), 'red').save(reference)
+    references.gallery.register(name='target' if registered else 'another medicine',
+        image_path=reference, category='medicine_box', detector_prompt='medicine_box')
+    context = rig.robot.context
+    context.object_references = references
+    context.detector = Mock()
+    context.detector.detect.return_value = {'detections': [
+        dict(object_id='detected_box', bbox=[10, 10, 60, 50], confidence=.99)]}
+    context.ocr = Mock()
+    monkeypatch.setattr(FindAndGraspMedicineSkill, '_recognize_image', rig.real_recognize)
+    rig.robot.config.enable_nesyro_gate = True
+    # An unidentified target can retain geometry, but must not authorize exploration here.
+    rig.robot.config.occlusion_allow_unlocalized_target = False
+
+    observed = rig.robot._observe_medicine_once('target')
+    assert observed.success, observed.error
+    assert observed.data['target_identified'] is registered
+    assert observed.data['geometry_occlusion']['primary']['relation_graph']['nodes']
+    if registered:
+        identity = observed.data['identity_evidence']
+        assert identity['encoder_model'] == 'mobileclip2_b'
+        assert identity['source'] == 'reference_gallery' and identity['accepted']
+        assert observed.data['grasp_input']['color_path'] == observed.data['geometry_capture']['color_path']
+        result = rig.robot.run([grasp('target'), place('blue tray')])
+        assert result.success, (result.error, result.data)
+        events = [e[0] for e in rig.events]
+        assert events.count('clear') == events.count('grasp_target') == 1
+        assert context.detector.detect.call_count == 2  # A fresh identity after clearing.
+        assert [e['event'] for e in rig.robot.geometry_occlusion_events].count('reobserve') == 1
+    else:
+        assert observed.data['selected_instance'] is None
+        result = prepare_grasp(rig.robot, 'target')
+        assert not result.success
+        assert not rig.plans
+        assert not any(e[0] in ('clear', 'grasp_target') for e in rig.events)
+        context.detector.detect.assert_not_called()
+    assert context.ocr.mock_calls == []
 
 
 @pytest.mark.parametrize('legacy_gate', [False, True])
-def test_agent_observe_clear_reobserve_grasp_and_relocalize_container(rig, legacy_gate):
+def test_agent_observe_clear_reobserve_grasp_and_reuse_fixed_container(rig, legacy_gate):
     rig.robot.config.enable_nesyro_gate = legacy_gate
     result = rig.robot.run([observe('target'), grasp('target'), place('blue tray')])
     assert result.success, (result.error, result.data)
@@ -152,12 +215,14 @@ def test_agent_observe_clear_reobserve_grasp_and_relocalize_container(rig, legac
     clear = names.index('clear')
     target = names.index('grasp_target')
     assert clear < names.index('recognize', clear) < target
-    assert names.count('observe_container') == 2  # Pre-observed plan invalidated by clear/grasp.
+    assert names.count('observe_container') == 1  # Fixed container survives clear/grasp.
     assert rig.robot.occlusion_recovery_counts == {'target': 1}
     assert rig.robot.geometry_buffer_slots_used == 1
     assert rig.plans[0]['mask_npy_path'] != rig.plans[-1]['mask_npy_path']
     assert rig.plans[0]['observation_provenance']['epoch'] < rig.plans[-1]['observation_provenance']['epoch']
-    assert not rig.robot.observations and not rig.robot.place_plans
+    assert set(rig.robot.observations) == {'blue tray'}
+    assert set(rig.robot.place_plans) == {'tray__blue'}
+    assert rig.robot.place_counts['tray__blue'] == 1
     assert [e['event'] for e in rig.robot.geometry_occlusion_events].count('reobserve') == 1
 
 
@@ -177,6 +242,56 @@ def test_main_execution_runtime_runs_the_same_closed_loop(rig, monkeypatch):
     failure.assert_not_called()
     assert any(e[0] == 'clear' for e in rig.events)
     assert any(e[0] == 'grasp_target' for e in rig.events)
+
+
+def test_validated_unblocked_geometry_is_not_vetoed_by_legacy_bbox_depth_spread(rig, monkeypatch):
+    import nesyro_gate.scene_memory_builder as builder
+    rig.camera.stage = 1
+    rig.robot.config.enable_nesyro_gate = True
+    monkeypatch.setattr(builder, '_estimate_depth_occlusion_level', lambda **kwargs: .59)
+    assert prepare_grasp(rig.robot, 'target').success
+    assert not rig.robot.build_scene_memory().objects['target'].graspable
+    result = rig.robot.gate_before_action(grasp('target'))
+    assert result.success
+    assert result.data['gate']['decision'] == 'EXECUTE'
+    assert result.data['gate']['lc'] == 1.
+    assert result.data['gate']['occlusion_evidence_source'] == 'validated_wrist_relation_graph'
+
+
+def test_actual_graph_occlusion_still_blocks_when_clearing_is_disabled(rig):
+    rig.robot.config.enable_nesyro_gate = True
+    rig.robot.config.enable_occlusion_recovery = False
+    result = rig.robot.gate_before_action(grasp('target'))
+    assert not result.success
+    assert result.data['failure_type'] == 'geometry_occlusion_clear_required'
+
+
+def test_yaw_pose_options_reach_both_blocker_and_target_planning(rig, monkeypatch):
+    from skill_lib.manipulation.plan_grasp_with_anygrasp import PlanGraspWithAnyGraspSkill
+    original = PlanGraspWithAnyGraspSkill.run
+    seen = []
+    options = dict(target_rz=-1.57, lam_rz=.25, enable_pose_fix=True)
+    rig.robot.config.grasp_pose_options = options
+    def plan(*args, **kwargs):
+        seen.append({key: kwargs.get(key) for key in options})
+        return original(*args, **kwargs)
+    monkeypatch.setattr(PlanGraspWithAnyGraspSkill, 'run', plan)
+    assert rig.robot.run([grasp('target'), place('blue tray')]).success
+    assert seen == [options, options]
+
+
+def test_validated_geometry_does_not_override_an_explicit_vlm_occlusion_verdict(rig, monkeypatch):
+    rig.camera.stage = 1
+    rig.robot.config.enable_nesyro_gate = True
+    rig.robot.config.enable_occlusion_recovery = False
+    def verdict(target):
+        rig.robot.observations[target]['vlm_occlusion'] = dict(
+            target_occluded=True, grasp_safe=False, occlusion_level=.7)
+        return SkillResult(True)
+    monkeypatch.setattr(rig.robot, '_run_vlm_occlusion_gate_if_enabled', verdict)
+    result = rig.robot.gate_before_action(grasp('target'))
+    assert not result.success
+    assert 'target_occluded' in result.data['failed_conditions']
 
 
 def test_cli_flags_reach_agent_and_skill_configuration_without_starting_services(monkeypatch, tmp_path):
@@ -199,11 +314,13 @@ def test_cli_flags_reach_agent_and_skill_configuration_without_starting_services
         return True
     monkeypatch.setattr(cli, 'run_goal', run)
     monkeypatch.setattr(sys, 'argv', ['app', '--goal', 'offline test', '--enable_geometry_occlusion',
+        '--disable_perception_pipeline',
         '--geometry_occlusion_checkpoint', str(tmp_path/'sam3.pt'), '--disable_geometry_occlusion_auxiliary',
         '--geometry_occlusion_buffer_pose_mmrad', '300', '-200', '250', '3.14', '0', '-1.57',
         '--geometry_occlusion_buffer_pose_mmrad', '350', '-200', '250', '3.14', '0', '-1.57'])
     cli.main()
     assert configs[0].enable_geometry_occlusion and not configs[0].geometry_occlusion_auxiliary
+    assert not configs[0].enable_perception_pipeline
 
 
 def test_manual_stop_failure_prevents_top_level_automatic_replanning(tmp_path, monkeypatch):
@@ -218,6 +335,56 @@ def test_manual_stop_failure_prevents_top_level_automatic_replanning(tmp_path, m
     monkeypatch.setattr(agent, '_replanning_stage', lambda *a: pytest.fail('must not reset clearing budget'))
     result = agent._run_task()
     assert not result.success and result.replan_attempts == 0
+
+
+@pytest.mark.parametrize('configured_home', [None, [.35, 0., .45, 3.14, 0., -1.57]])
+def test_xyz_buffer_uses_actual_startup_flange_angles_and_preserves_mm(monkeypatch, configured_home):
+    from agents.simple_execution_runtime import SimpleExecutionRuntime
+    from runtime.config import SimpleAgentSystemConfig
+    from hardware.interfaces import Pose6D
+    import hardware.config
+    monkeypatch.setattr(hardware.config, 'load_config',
+        lambda path: SimpleNamespace(arm=SimpleNamespace(home_pose=configured_home)))
+    arm = Mock()
+    arm.get_pose.return_value = Pose6D(.4, .02, .5, -3.05, .03, -1.35)
+    explicit = [300., -200., 250., 3.14, 0., -1.57]
+    config = SimpleAgentSystemConfig(goal='offline test', hardware_config_path='mock.yaml',
+        geometry_occlusion_buffer_poses_mmrad=[explicit],
+        geometry_occlusion_buffer_positions_mm=[[450., -300., 200.]])
+    robot = SimpleExecutionRuntime(config)._build_robot(RuntimeContext(arm=arm))
+    assert robot.config.geometry_occlusion_buffer_poses_mmrad == [
+        explicit, [450., -300., 200., -3.05, .03, -1.35]]
+    assert config.geometry_occlusion_buffer_poses_mmrad == [explicit]
+    arm.get_pose.assert_called_once_with()
+    arm.move_pose.assert_not_called()
+    assert robot.config.home_pose_mmrad == pytest.approx(
+        [v*1000 for v in configured_home[:3]]+configured_home[3:]
+        if configured_home else [400., 20., 500., -3.05, .03, -1.35])
+
+
+def test_xyz_buffer_cli_reaches_full_agent_configuration(monkeypatch):
+    import sys
+    from app import cli
+    import hardware.runtime
+    monkeypatch.setattr(hardware.runtime, 'apply_cli_profile',
+                        lambda args: setattr(args, 'simple_actions', True))
+    configs = []
+    def run(args, goal, executor_args):
+        configs.append(cli.build_config(args, goal, executor_args))
+        return True
+    monkeypatch.setattr(cli, 'run_goal', run)
+    monkeypatch.setattr(sys, 'argv', ['app', '--goal', '西瓜霜放到蓝色盘子',
+        '--geometry_occlusion_buffer_xyz_mm', '450', '-300', '200',
+        '--enable_geometry_occlusion', '--occlusion_allow_unlocalized_target', '--use_llm_planner',
+        '--enable_llm_occlusion_recovery', '--geometry_occlusion_observation_budget', '3',
+        '--geometry_occlusion_recovery_view_pose_mmrad', '400', '-100', '650', '3.14', '0', '-1.57'])
+    cli.main()
+    assert configs[0].geometry_occlusion_buffer_positions_mm == [[450., -300., 200.]]
+    assert configs[0].enable_geometry_occlusion and configs[0].occlusion_allow_unlocalized_target
+    assert configs[0].use_llm_planner
+    assert configs[0].enable_llm_occlusion_recovery
+    assert configs[0].geometry_occlusion_observation_budget == 3
+    assert configs[0].geometry_occlusion_recovery_view_poses_mmrad == [[400., -100., 650., 3.14, 0., -1.57]]
 
 
 @pytest.mark.parametrize('geometry_enabled', [True, False])
@@ -309,6 +476,185 @@ def test_target_missing_remains_unknown_and_search_is_explicit(rig, monkeypatch)
     assert any(e.get('status') == 'exploratory_clear_candidate' for e in rig.robot.geometry_occlusion_events)
 
 
+class MenuPlanner:
+    """Choose only from the actual runtime menu; does not call any endpoint."""
+    def __init__(self, prefer_view=None):
+        self.snapshots = []
+        self.prefer_view = prefer_view
+
+    def decide(self, snapshot):
+        self.snapshots.append(deepcopy(snapshot))
+        actions = snapshot['allowed_actions']
+        choice = next((a for a in actions if a['action'] == 'clear'), None)
+        if choice is None and self.prefer_view:
+            choice = next((a for a in actions if a.get('view_id') == self.prefer_view), None)
+        choice = choice or next((a for a in actions if a['action'] == 'observe'), actions[0])
+        return dict(snapshot_id=snapshot['snapshot_id'], action_id=choice['action_id'],
+                    reason='依据当前快照选择可执行的下一步')
+
+
+@pytest.mark.parametrize('observation_budget', [0, 2])
+def test_full_agent_llm_recovery_still_clears_grasps_and_places(rig, observation_budget):
+    planner = MenuPlanner()
+    rig.robot.context.occlusion_recovery_planner = planner
+    rig.robot.config.enable_llm_occlusion_recovery = True
+    rig.robot.config.geometry_occlusion_observation_budget = observation_budget
+    rig.robot.config.enable_nesyro_gate = True
+    result = rig.robot.run([observe('target'), grasp('target'), place('blue tray')])
+    assert result.success, (result.error, result.data)
+    names = [e[0] for e in rig.events]
+    assert names.count('clear') == names.count('grasp_target') == 1
+    assert names.count('observe_container') == 1
+    assert len(planner.snapshots) == 1
+
+
+@pytest.mark.parametrize('llm_enabled', [False, True])
+def test_partial_blocker_depth_reaches_original_clear_skill_and_finishes_task(rig, monkeypatch, llm_enabled):
+    original_capture = rig.camera.capture_wrist
+    def partial_capture():
+        capture = original_capture()
+        if rig.camera.stage == 0:
+            depth = cv2.imread(capture['depth_path'], cv2.IMREAD_UNCHANGED)
+            y, x = np.indices(depth.shape)
+            front = (x >= 25) & (x < 45) & (y >= 20) & (y < 55)
+            depth[front & ((x % 10) < 3)] = 0  # 70% measured depth, no fabricated fill.
+            cv2.imwrite(capture['depth_path'], depth)
+        return capture
+    monkeypatch.setattr(rig.camera, 'capture_wrist', partial_capture)
+    rig.robot.config.enable_nesyro_gate = True
+    rig.robot.config.enable_llm_occlusion_recovery = llm_enabled
+    planner = MenuPlanner()
+    rig.robot.context.occlusion_recovery_planner = planner
+    # Graph-based clearing must not inherit the legacy ROI percentage cutoff.
+    rig.robot.config.occlusion_min_depth_valid_ratio = .99
+    result = rig.robot.run([grasp('target'), place('blue tray')])
+    assert result.success, (result.error, result.data)
+    names = [e[0] for e in rig.events]
+    assert names.count('clear') == names.count('grasp_target') == 1
+    assert names.count('observe_container') == 1
+    if llm_enabled:
+        node = next(n for n in planner.snapshots[0]['nodes'] if n['geometry_eligible'])
+        assert node['depth_coverage'] == pytest.approx(.7)
+        assert planner.snapshots[0]['geometry_requirements']['depth_coverage_filter_enabled'] is False
+
+
+@pytest.mark.parametrize('llm_enabled', [False, True])
+@pytest.mark.parametrize('occluded', [False, True])
+def test_border_target_and_blocker_reach_planning_without_redundant_observation(rig, llm_enabled, occluded):
+    rig.service.backend.target_right = 80  # Target touches the right image edge.
+    rig.service.backend.blocker_bottom = 60  # Blocker touches the bottom edge.
+    rig.camera.stage = 0 if occluded else 1
+    rig.robot.config.enable_nesyro_gate = True
+    rig.robot.config.enable_llm_occlusion_recovery = llm_enabled
+    planner = MenuPlanner()
+    rig.robot.context.occlusion_recovery_planner = planner
+    result = rig.robot.run([grasp('target'), place('blue tray')])
+    assert result.success, (result.error, result.data)
+    names = [e[0] for e in rig.events]
+    assert names.count('clear') == int(occluded)
+    assert names.count('grasp_target') == 1
+    assert names.count('recognize') == 1 + int(occluded)
+    assert len(rig.plans) == 1 + int(occluded)
+    assert np.load(rig.plans[-1]['mask_npy_path'])[:, -1].any()
+    if occluded:
+        assert np.load(rig.plans[0]['mask_npy_path'])[-1].any()
+    assert not any(item['event'] == 'recovery_observation'
+                   for item in rig.robot.geometry_recovery_state['history'])
+    assert len(planner.snapshots) == int(llm_enabled and occluded)
+    if planner.snapshots:
+        blocker = next(n for n in planner.snapshots[0]['nodes'] if n['geometry_eligible'])
+        assert blocker['quality_issues'] == []
+        assert 'truncated_at_image_border' in blocker['quality_diagnostics']
+
+
+def test_llm_recovers_inside_same_task_without_resetting_clear_or_buffer_budget(rig, monkeypatch):
+    from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+    from agents.simple_execution_runtime import SimpleExecutionRuntime
+    planner = MenuPlanner()
+    rig.robot.context.occlusion_recovery_planner = planner
+    rig.robot.config.enable_llm_occlusion_recovery = True
+    rig.robot.config.occlusion_recovery_max_attempts = 1
+    rig.robot.config.occlusion_allow_unlocalized_target = True
+    def recognize(skill, **kwargs):
+        if rig.camera.count < 3:
+            return SkillResult(False, error='target not confirmed yet')
+        return rig.recognize(skill, **kwargs)
+    monkeypatch.setattr(FindAndGraspMedicineSkill, '_recognize_image', recognize)
+    result = prepare_grasp(rig.robot, 'target')
+    assert result.success, (result.error, result.data)
+    assert len(planner.snapshots) == 2
+    after_clear = planner.snapshots[1]
+    assert after_clear['clear_count'] == after_clear['clear_limit'] == 1
+    assert after_clear['buffer_slots'][0]['occupied']
+    assert not any(a['action'] == 'clear' for a in after_clear['allowed_actions'])
+    assert rig.robot.occlusion_recovery_counts == {'target': 1}
+    assert rig.robot.geometry_buffer_slots_used == 1
+    assert rig.robot.geometry_recovery_state['observation_counts'] == {'target': 1}
+    assert [e[0] for e in rig.events].count('clear') == 1
+    assert rig.camera.count == 3
+    assert validate_prepared(rig.robot.context, rig.robot.observations['target']['result'], 'target')
+    memory = rig.root/'task_memory.json'
+    runtime = SimpleExecutionRuntime(SimpleNamespace(goal='offline', simple_memory_path=str(memory)))
+    runtime._save_memory(rig.robot, [])
+    saved = json.loads(memory.read_text())['geometry_recovery']
+    assert saved['clear_counts'] == {'target': 1} and saved['buffer_slots_used'] == 1
+    assert saved['state']['observation_counts'] == {'target': 1}
+
+
+def test_llm_observation_budget_ends_in_pause_without_repeat_clear(rig, monkeypatch):
+    from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+    planner = MenuPlanner()
+    rig.robot.context.occlusion_recovery_planner = planner
+    rig.robot.config.enable_llm_occlusion_recovery = True
+    rig.robot.config.occlusion_allow_unlocalized_target = True
+    rig.robot.config.geometry_occlusion_observation_budget = 1
+    monkeypatch.setattr(FindAndGraspMedicineSkill, '_recognize_image',
+                        lambda *args, **kwargs: SkillResult(False, error='still unknown'))
+    result = prepare_grasp(rig.robot, 'target')
+    assert not result.success and result.data['failure_type'] == 'geometry_occlusion_recovery_paused'
+    assert result.data['recovery_pending'] and not result.data['automatic_replan']
+    assert len(planner.snapshots) == 3  # Clear, one fresh observation, pause.
+    assert planner.snapshots[-1]['allowed_actions'] == [dict(action_id='pause', action='pause')]
+    assert rig.camera.count == 3 and rig.robot.geometry_buffer_slots_used == 1
+    assert [e[0] for e in rig.events].count('clear') == 1
+
+
+def test_llm_can_choose_only_an_explicit_registered_recovery_view(rig, monkeypatch):
+    from skill_lib.combound.find_and_grasp_medicine import FindAndGraspMedicineSkill
+    rig.camera.stage = 1
+    rig.robot.config.enable_llm_occlusion_recovery = True
+    pose = [400., -100., 650., 3.14, 0., -1.57]
+    rig.robot.config.geometry_occlusion_recovery_view_poses_mmrad = [pose]
+    rig.robot.context.occlusion_recovery_planner = MenuPlanner(prefer_view='view_1')
+    def recognize(skill, **kwargs):
+        if rig.camera.count == 1: return SkillResult(False, error='need another view')
+        return rig.recognize(skill, **kwargs)
+    monkeypatch.setattr(FindAndGraspMedicineSkill, '_recognize_image', recognize)
+    result = prepare_grasp(rig.robot, 'target')
+    assert result.success, (result.error, result.data)
+    assert [('move', pose, 0)] == [e for e in rig.events if e[0] == 'move']
+    assert rig.robot.geometry_recovery_state['observation_counts'] == {'target': 1}
+
+
+def test_llm_fabricated_action_or_stale_clear_never_starts_motion(rig):
+    rig.robot.config.enable_llm_occlusion_recovery = True
+    planner = Mock()
+    planner.decide.side_effect = lambda s: dict(snapshot_id=s['snapshot_id'],
+        action_id='clear:invented-node', reason='invalid')
+    rig.robot.context.occlusion_recovery_planner = planner
+    result = prepare_grasp(rig.robot, 'target')
+    assert result.data['failure_type'] == 'geometry_occlusion_recovery_planner_failed'
+    assert not rig.plans and not rig.robot.geometry_buffer_slots_used
+    def stale(s):
+        rig.camera.observation_memory.invalidate('scene changed during model call', discard_scene=True)
+        action = next(a for a in s['allowed_actions'] if a['action'] == 'clear')
+        return dict(snapshot_id=s['snapshot_id'], action_id=action['action_id'], reason='old scene')
+    planner.decide.side_effect = stale
+    result = prepare_grasp(rig.robot, 'target')
+    assert result.data['failure_type'] == 'geometry_occlusion_recovery_stale'
+    assert not rig.plans and not rig.robot.geometry_buffer_slots_used
+
+
 def test_clear_failure_stops_before_reobserve_or_target_grasp(rig, monkeypatch):
     from skill_lib.manipulation.clear_occlusion_to_buffer import ClearOcclusionToBufferSkill
     @scene_mutation('mock_partial_clear')
@@ -322,6 +668,27 @@ def test_clear_failure_stops_before_reobserve_or_target_grasp(rig, monkeypatch):
     assert rig.robot.geometry_buffer_slots_used == 1
     assert not any(e[0] == 'grasp_target' for e in rig.events)
     assert not rig.robot.observations
+
+
+def test_clear_communication_error_preserves_first_fault_in_report(rig, monkeypatch):
+    from hardware.robotiq import GripperError
+    from skill_lib.manipulation.clear_occlusion_to_buffer import ClearOcclusionToBufferSkill
+    diagnostics = dict(communication_mode='process', worker_pid=12345,
+        first_fault=dict(message='Status update gap exceeded', status_gap_s=.71,
+                         state_timeout_s=.5, status_transaction_s=.01))
+    gripper = Mock()
+    gripper.session_info.return_value = diagnostics
+    rig.robot.context.gripper = gripper
+    def fail(skill, plan, **kwargs):
+        raise GripperError('Status update gap exceeded')
+    monkeypatch.setattr(ClearOcclusionToBufferSkill, '_execute_to_buffer', fail)
+    result = prepare_grasp(rig.robot, 'target')
+    assert result.data['failure_type'] == 'geometry_occlusion_clear_failed'
+    clear = result.data['clear_result']
+    assert clear['failure_type'] == 'occlusion_recovery_error'
+    assert clear['gripper_session'] == diagnostics
+    assert not result.data['automatic_replan']
+    assert not any(e[0] in ('grasp_target', 'clear') for e in rig.events)
 
 
 def test_prepared_grasp_uses_the_analyzed_frame_and_rejects_epoch_or_file_change(rig):

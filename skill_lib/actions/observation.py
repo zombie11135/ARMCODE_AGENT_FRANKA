@@ -64,9 +64,6 @@ def preobserve_containers(robot: SimpleRobotActions, actions: Iterable[SimpleAct
 @reuse_observation('container')
 def observe_container(robot: SimpleRobotActions, container: str) -> SkillResult:
     spec = parse_container_spec(container)
-    key = container_key(spec)
-    if key in robot.place_plans and memory_for(robot.context.camera) is None:
-        return SkillResult(success=True, data=robot.place_plans[key], message="container plan already cached")
 
     from skill_lib.combound.place_to_container import PlaceToContainerSkill
 
@@ -213,7 +210,5 @@ def _scan_until_found(
 
 
 def _invalidate_container_cache(robot: SimpleRobotActions, container: str) -> None:
-    spec = parse_container_spec(container)
-    key = container_key(spec)
-    robot.place_plans.pop(key, None)
-    robot.observations.pop(container, None)
+    from .task_containers import forget_container
+    forget_container(robot, container)

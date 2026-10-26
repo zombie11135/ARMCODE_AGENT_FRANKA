@@ -1,4 +1,4 @@
-"""Full-image/overlapping-tile proposals without changing visible geometry.
+"""Full-image/tile proposals with local resegmentation of unresolved crop edges.
 
 Prompt/crop scores remain uncalibrated. Repeated predictions are not independent
 observations: select one measured-image mask per duplicate hypothesis, never
@@ -10,7 +10,9 @@ import time
 
 import numpy as np
 
-DEFAULT_OCCLUSION_PROMPTS = ("box", "bottle", "cylindrical container", "plate", "cup")
+# Detect small blocks directly as well as during crop-edge recovery. Otherwise
+# a missed generic "box" proposal leaves no fragment to trigger that recovery.
+DEFAULT_OCCLUSION_PROMPTS = ("box", "bottle", "cylindrical container", "plate", "cup", "cube", "block")
 
 
 @dataclass(frozen=True)
@@ -19,15 +21,16 @@ class RefinementConfig:
     duplicate_iou: float = .85
     internal_edge_margin_px: int = 2
     minimum_mask_pixels: int = 32
+    max_recovery_windows: int = 4
 
     def __post_init__(self):
         if not np.isfinite(self.tile_fraction) or not .5 < self.tile_fraction < 1:
             raise ValueError("tile_fraction must be in (.5, 1)")
         if not np.isfinite(self.duplicate_iou) or not .5 < self.duplicate_iou <= 1:
             raise ValueError("duplicate_iou must be in (.5, 1]")
-        for name in ("internal_edge_margin_px", "minimum_mask_pixels"):
+        for name in ("internal_edge_margin_px", "minimum_mask_pixels", "max_recovery_windows"):
             value = getattr(self, name)
-            if type(value) is not int or value < (0 if name == "internal_edge_margin_px" else 1):
+            if type(value) is not int or value < (1 if name == "minimum_mask_pixels" else 0):
                 raise ValueError(f"invalid {name}")
 
 
@@ -128,36 +131,78 @@ def select_visible_hypotheses(proposals, containment_threshold=.8):
     }
 
 
+def _recovery_window(mask, image_shape, expansion):
+    """Recenter around the observed fragment, with room beyond the old crop."""
+    height, width = image_shape[:2]
+    y, x = np.nonzero(mask)
+    padding = max(24, int(max(np.ptp(x)+1, np.ptp(y)+1) * expansion))
+    return (max(0, int(x.min())-padding), max(0, int(y.min())-padding),
+            min(width, int(x.max())+1+padding), min(height, int(y.max())+1+padding))
+
+
 def refine_proposals(image, prompts, backend, config=None):
     config = config or RefinementConfig()
     height, width = image.shape[:2]
     eligible, raw, audit, window_reports = [], [], [], []
+    fragments = []
     started = time.perf_counter()
-    for window_index, window in enumerate(image_windows(width, height, config)):
+
+    def collect(window, window_prompts, recovery_from=None):
+        window_index = len(window_reports)
         x0, y0, x1, y1 = window
-        local_rows, metadata = backend.predict(image[y0:y1, x0:x1], prompts,
+        local_rows, metadata = backend.predict(image[y0:y1, x0:x1], window_prompts,
                                                min_mask_pixels=config.minimum_mask_pixels)
         window_reports.append({"window_index": window_index, "window_xyxy": list(window),
+                               "recovery_from_raw_id": recovery_from,
+                               "prompts": list(window_prompts),
                                "proposals_per_prompt": metadata.get("proposals_per_prompt", {}),
                                "backend_inference_seconds": metadata.get("inference_seconds")})
         for local in local_rows:
             raw_id = f"raw_{len(raw):04d}"
+            mapped, status = remap_proposal(local, window, image.shape, config.internal_edge_margin_px)
             full_mask = np.zeros((height, width), bool)
             local_mask = np.asarray(local["mask"], bool)
-            if local_mask.shape != (y1-y0, x1-x0):
-                raise ValueError("backend mask does not match crop dimensions")
             full_mask[y0:y1, x0:x1] = local_mask
             raw_row = {**local, "source_id": raw_id, "mask": full_mask,
-                       "source_window_xyxy": list(window)}
+                       "source_window_xyxy": list(window), "recovery_from_raw_id": recovery_from}
             raw.append(raw_row)
-            mapped, status = remap_proposal(local, window, image.shape, config.internal_edge_margin_px)
             if mapped is not None and mapped["mask"].sum() < config.minimum_mask_pixels:
                 status, mapped = "small_mask", None
             audit.append({"raw_id": raw_id, "window_index": window_index,
                           "prompt": local.get("prompt"), "confidence": local["confidence"],
-                          "status": status, "mask_key": raw_id})
+                          "status": status, "mask_key": raw_id,
+                          "recovery_from_raw_id": recovery_from})
+            if status == "touches_internal_crop_edge" and recovery_from is None:
+                fragments.append(raw_row)
             if mapped is not None:
-                eligible.append({**mapped, "source_id": raw_id})
+                eligible.append({**mapped, "source_id": raw_id, "recovery_from_raw_id": recovery_from})
+
+    for window in image_windows(width, height, config):
+        collect(window, prompts)
+
+    def covered(fragment):
+        # Most tile-edge fragments already have a complete full-frame/tile
+        # prediction. Only unresolved fragments need another model call.
+        area = int(fragment['mask'].sum())
+        return any(np.count_nonzero(fragment['mask'] & p['mask']) >= config.duplicate_iou * area
+                   for p in eligible)
+
+    recovery_count = 0
+    seen_windows = {tuple(r['window_xyxy']) for r in window_reports}
+    for fragment in sorted(fragments, key=lambda p: -p['confidence']):
+        if covered(fragment):
+            continue
+        recovery_prompts = list(dict.fromkeys([fragment['prompt'], 'cube', 'block']))
+        for expansion in (1, 2):
+            if recovery_count >= config.max_recovery_windows or covered(fragment):
+                break
+            window = _recovery_window(fragment['mask'], image.shape, expansion)
+            if window in seen_windows:
+                continue
+            seen_windows.add(window)
+            collect(window, recovery_prompts, fragment['source_id'])
+            recovery_count += 1
+
     retained, grouping_audit = deduplicate(eligible, config.duplicate_iou)
     for row in audit:
         row.update(grouping_audit.get(row["raw_id"], {}))
@@ -165,6 +210,8 @@ def refine_proposals(image, prompts, backend, config=None):
               "confidence_threshold": getattr(backend, "confidence", None),
               "prompts": list(prompts), "config": asdict(config), "window_reports": window_reports,
               "raw_proposals": len(raw), "retained_proposals": len(retained),
+              "recovery_windows": recovery_count,
+              "recovered_proposals": sum(p['recovery_from_raw_id'] is not None for p in retained),
               "internal_crop_edge_rejections": sum(a["status"] == "touches_internal_crop_edge" for a in audit),
               "duplicate_proposals": sum(a["status"] == "duplicate_hypothesis" for a in audit),
               "proposal_audit": audit, "inference_seconds": time.perf_counter()-started,

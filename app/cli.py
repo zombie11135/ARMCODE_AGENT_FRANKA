@@ -123,9 +123,9 @@ def print_help():
 内置命令：
   /help, help, 帮助              显示帮助
   /quit, quit, exit, 退出        退出系统
-  /home, home, 回到初始位置       移动到初始位姿 [345,0,450,3.14,0,-1.57]
-  /open, 打开夹爪                rosservice call /grip 1
-  /close, 关闭夹爪               rosservice call /grip 0
+  /home, home, 回到初始位置       FR3 返回本会话 home（配置位姿或首次实际法兰位姿）
+  /open, 打开夹爪                打开当前配置的夹爪
+  /close, 关闭夹爪               关闭当前配置的夹爪
   /reset, 重置执行状态            清空 execution_state / failure_report
   /clearcache, 清空模型缓存       清空已加载的 GroundingDINO/OCR
   /stopcamera, 关闭相机           停止缓存中的相机服务
@@ -337,8 +337,10 @@ def run_builtin_command(command: str, args) -> bool:
 
 def build_config(args, goal: str, executor_args):
     if args.simple_actions:
+        from runtime.home_pose import home_pose_session
         return SimpleAgentSystemConfig(
             goal=goal,
+            home_pose_session=home_pose_session(args) if getattr(args, 'hardware_config', None) else None,
             target_name_bindings=dict(getattr(args, 'next_task_name_bindings', {})),
             hardware_config_path=getattr(args, "hardware_config", None),
             arm_speed_scaling=getattr(args, "arm_speed_scaling", None),
@@ -347,7 +349,8 @@ def build_config(args, goal: str, executor_args):
             grasp_random_select_top_k=args.grasp_random_select_top_k,
             grasp_random_seed=args.grasp_random_seed,
             grasp_pose_options={name: getattr(args, 'grasp_' + name) for name in
-                ('target_rx', 'target_ry', 'max_rx_tilt_deg', 'max_ry_tilt_deg', 'lam_rx', 'lam_ry')},
+                ('target_rx', 'target_ry', 'target_rz', 'max_rx_tilt_deg', 'max_ry_tilt_deg',
+                 'lam_rx', 'lam_ry', 'lam_rz', 'enable_pose_fix')},
             project_root=str(PROJECT_ROOT),
             use_vdm=args.use_vdm,
             use_llm_planner=args.use_llm_planner,
@@ -383,9 +386,14 @@ def build_config(args, goal: str, executor_args):
             vlm_occlusion_temperature=args.vlm_occlusion_temperature,
             enable_occlusion_recovery=args.enable_occlusion_recovery,
             enable_geometry_occlusion=getattr(args, 'enable_geometry_occlusion', False),
+            enable_perception_pipeline=not getattr(args, 'disable_perception_pipeline', False),
             geometry_occlusion_checkpoint=getattr(args, 'geometry_occlusion_checkpoint', ''),
             geometry_occlusion_auxiliary=not getattr(args, 'disable_geometry_occlusion_auxiliary', False),
             geometry_occlusion_buffer_poses_mmrad=getattr(args, 'geometry_occlusion_buffer_pose_mmrad', []),
+            geometry_occlusion_buffer_positions_mm=getattr(args, 'geometry_occlusion_buffer_xyz_mm', []),
+            enable_llm_occlusion_recovery=getattr(args, 'enable_llm_occlusion_recovery', False),
+            geometry_occlusion_observation_budget=getattr(args, 'geometry_occlusion_observation_budget', 2),
+            geometry_occlusion_recovery_view_poses_mmrad=getattr(args, 'geometry_occlusion_recovery_view_pose_mmrad', []),
             occlusion_recovery_max_attempts=args.occlusion_recovery_max_attempts,
             occlusion_buffer_pose_mmrad=args.occlusion_buffer_pose_mmrad,
             occlusion_buffer_approach_clearance_mm=args.occlusion_buffer_approach_clearance_mm,
@@ -752,10 +760,14 @@ def main():
     parser.add_argument("--grasp-random-seed", type=int, default=None)
     parser.add_argument("--grasp-target-rx", type=float, default=3.141592653589793, help="基座系法兰目标 roll，弧度")
     parser.add_argument("--grasp-target-ry", type=float, default=0., help="基座系法兰目标 pitch，弧度")
+    parser.add_argument("--grasp-target-rz", type=float, default=-1.57, help="基座系法兰偏好 yaw，弧度；保留抓取几何")
     parser.add_argument("--grasp-max-rx-tilt-deg", type=float, default=65.)
     parser.add_argument("--grasp-max-ry-tilt-deg", type=float, default=65.)
     parser.add_argument("--grasp-lam-rx", type=float, default=1., help="roll 偏差惩罚，按弧度计算")
     parser.add_argument("--grasp-lam-ry", type=float, default=1., help="pitch 偏差惩罚，按弧度计算")
+    parser.add_argument("--grasp-lam-rz", type=float, default=.25, help="yaw 偏差惩罚，按弧度计算")
+    parser.add_argument("--no-grasp-pose-fix", dest="grasp_enable_pose_fix", action="store_false", default=True,
+                        help="停用平行夹爪的 180 度等价姿态选择")
     parser.add_argument("--execute_robot", action="store_true")
     parser.add_argument(
         "--debug_output",
@@ -891,10 +903,21 @@ def main():
     parser.add_argument("--occlusion_recovery_max_attempts", type=int, default=1)
     parser.add_argument('--enable_geometry_occlusion', action='store_true',
                         help='接入腕部主/固定辅助的 RGB-D 关系图，在目标抓取前执行有界清障与重观测循环')
+    parser.add_argument('--disable_perception_pipeline', action='store_true',
+                        help='关闭首帧后台分析/候选预计算，使用原串行调度以便对比')
     parser.add_argument('--geometry_occlusion_checkpoint', default='', help='SAM3 sam3.pt，默认采用硬件配置目录')
     parser.add_argument('--disable_geometry_occlusion_auxiliary', action='store_true', help='只启用腕部关系图')
     parser.add_argument('--geometry_occlusion_buffer_pose_mmrad', type=float, nargs=6, action='append', default=[],
                         metavar='VALUE', help='一个已检查的空闲缓冲位姿 X Y Z RX RY RZ（毫米/弧度）；可重复提供独立槽位')
+    parser.add_argument('--geometry_occlusion_buffer_xyz_mm', type=float, nargs=3, action='append', default=[],
+                        metavar='MM', help='FR3 遮挡物释放时的法兰 XYZ（毫米），朝向沿用本轮启动时实际法兰 RPY；不是桌面点或 TCP 坐标')
+    parser.add_argument('--enable_llm_occlusion_recovery', action='store_true',
+                        help='原 agent 内启用单步 LLM 清障恢复；仅可选择已校验动作，不重置任务预算')
+    parser.add_argument('--geometry_occlusion_observation_budget', type=int, choices=range(0, 11), default=2,
+                        help='每目标 LLM 恢复额外观测次数上限，与清障次数独立')
+    parser.add_argument('--geometry_occlusion_recovery_view_pose_mmrad', type=float, nargs=6,
+                        action='append', default=[], metavar='VALUE',
+                        help='已配置的恢复观测法兰位姿 XYZ RPY（毫米/弧度）；LLM 只能按编号选择')
     parser.add_argument(
         "--occlusion_buffer_pose_mmrad",
         type=float,
@@ -1060,6 +1083,8 @@ def main():
         help="传给生成脚本的额外参数。用 -- 分隔，例如：-- --visualize_selected_grasp",
     )
     args = parser.parse_args()
+    if args.enable_llm_occlusion_recovery and (not args.enable_geometry_occlusion or args.legacy_xarm):
+        parser.error('LLM 清障恢复需要 FR3 模式及 --enable_geometry_occlusion')
     from hardware.agent_geometry import validate_pose_selection
     try:
         validate_pose_selection(**{name: getattr(args, 'grasp_' + name) for name in

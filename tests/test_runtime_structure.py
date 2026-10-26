@@ -22,6 +22,19 @@ def fake_module(monkeypatch, name, **attributes):
     monkeypatch.setitem(sys.modules, name, module)
 
 
+def test_empty_action_sequence_is_rejected_before_context_or_hardware(monkeypatch):
+    from agents.simple_execution_runtime import SimpleExecutionRuntime
+
+    geometry = Mock()
+    fake_module(monkeypatch, "hardware.runtime", require_task_geometry=geometry)
+    runtime = SimpleExecutionRuntime(SimpleAgentSystemConfig(goal="offline", execute_robot=True))
+    runtime._build_execution_context = Mock(side_effect=AssertionError("must not start services"))
+    with pytest.raises(ValueError, match="没有可执行动作"):
+        runtime.run([])
+    geometry.assert_not_called()
+    runtime._build_execution_context.assert_not_called()
+
+
 def test_shared_definitions_import_without_agent_model_or_device_backends():
     # A fresh interpreter prevents previously cached imports from hiding coupling.
     code = """

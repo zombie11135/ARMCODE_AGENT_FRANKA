@@ -193,7 +193,8 @@ class FindAndGraspMedicineSkill(BaseSkill):
                     collision_detection=collision_detection,
                 )
                 pose_options = dict(grasp_pose_options or {})
-                allowed = {'target_rx', 'target_ry', 'max_rx_tilt_deg', 'max_ry_tilt_deg', 'lam_rx', 'lam_ry'}
+                allowed = {'target_rx', 'target_ry', 'target_rz', 'max_rx_tilt_deg', 'max_ry_tilt_deg',
+                           'lam_rx', 'lam_ry', 'lam_rz', 'enable_pose_fix'}
                 if set(pose_options) - allowed:
                     raise ValueError(f"Unknown grasp pose options: {sorted(set(pose_options) - allowed)}")
                 plan_kwargs.update(pose_options)

@@ -97,6 +97,9 @@ class Robotiq2F85:
         self._feedback_started_at = None
         self._feedback_trip = None
         self.last_motion_feedback = None
+        self._first_fault = None
+        self._last_status_gap_s = self._max_status_gap_s = 0.
+        self._last_status_transaction_s = self._last_status_lock_wait_s = 0.
 
     def _connect(self):
         if self._closed:
@@ -164,11 +167,17 @@ class Robotiq2F85:
 
     def status(self):
         """Read one raw snapshot. This does not activate or start keepalive."""
+        requested_at = time.monotonic()
         with self._io_lock:
+            started_at = time.monotonic()
             previous_at = self._last_status_at
             payload = self._exchange(struct.pack(">HH", 0x07D0, 3), 3)
             state = GripperStatus.decode(payload[1:])
             self._last_status, self._last_status_at = state, time.monotonic()
+            self._last_status_lock_wait_s = started_at-requested_at
+            self._last_status_transaction_s = self._last_status_at-started_at
+            self._last_status_gap_s = 0. if previous_at is None else self._last_status_at-previous_at
+            self._max_status_gap_s = max(self._max_status_gap_s, self._last_status_gap_s)
             self._record_motion_feedback(state)
             self._read_count += 1
             if self._session_started:
@@ -241,6 +250,12 @@ class Robotiq2F85:
         # Never erase a session failure just because a later read looks healthy.
         if self._session_error is None:
             self._session_error = str(message)
+            self._first_fault = dict(message=str(message), unix_s=time.time(),
+                status_age_s=None if self._last_status_at is None else time.monotonic()-self._last_status_at,
+                status_gap_s=self._last_status_gap_s, state_timeout_s=self.config.state_timeout_s,
+                status_transaction_s=self._last_status_transaction_s,
+                status_lock_wait_s=self._last_status_lock_wait_s,
+                status=None if self._last_status is None else self._last_status.to_dict())
 
     def start_session(self):
         """Open/read/keepalive only. Startup 0x09 may clear by reading, not reset.
@@ -257,6 +272,9 @@ class Robotiq2F85:
                 raise ValueError("startup_timeout_s must be finite and positive")
             self._closed = False
             self._session_error = None
+            self._first_fault = None
+            self._last_status_at = None
+            self._last_status_gap_s = self._max_status_gap_s = 0.
             self._monitor_stop.clear()
             try:
                 deadline = time.monotonic() + self.config.startup_timeout_s
@@ -310,6 +328,11 @@ class Robotiq2F85:
         with self._io_lock:
             return {"active": self._session_started, "monitor_alive": bool(self._monitor and self._monitor.is_alive()),
                     "error": self._session_error, "keepalive_interval_s": self.config.keepalive_interval_s,
+                    "state_timeout_s": self.config.state_timeout_s,
+                    "last_status_gap_s": self._last_status_gap_s, "max_status_gap_s": self._max_status_gap_s,
+                    "last_status_transaction_s": self._last_status_transaction_s,
+                    "last_status_lock_wait_s": self._last_status_lock_wait_s,
+                    "first_fault": self._first_fault,
                     "last_status_age_s": None if self._last_status_at is None else time.monotonic() - self._last_status_at,
                     "successful_status_reads": self._read_count, "write_register_requests": self._write_count,
                     "execution_enabled": self.execution_enabled,

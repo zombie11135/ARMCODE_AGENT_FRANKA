@@ -11,7 +11,8 @@ def _key(robot, kind, target):
     context = robot.context
     # Include selection/OCR settings and live backend identities. This memory is
     # deliberately not restored from task JSON written by an earlier process.
-    return ('skill', kind, str(target), repr(vars(robot.config)),
+    return ('skill', kind, str(target),
+            robot._container_task_id if kind == 'container' else None, repr(vars(robot.config)),
             tuple(id(getattr(context, name, None)) for name in
                   ('detector', 'segmenter', 'ocr', 'object_references', 'occlusion')))
 
@@ -25,6 +26,9 @@ def _observation(kind, target, data):
 
 
 def _publish(robot, target, observation, data):
+    if observation['kind'] == 'container':
+        from .task_containers import remember_container
+        remember_container(robot, target, data)
     robot.observations[target] = observation
     if observation['kind'] == 'container':
         key = observation['container_key']
@@ -38,6 +42,19 @@ def _stale_result():
 
 
 def recall_observation(robot, kind, target):
+    if kind == 'container':
+        from .task_containers import recall_container
+        fixed = recall_container(robot, target)
+        if fixed is not None:
+            return fixed
+    if kind == 'medicine' and robot._pipeline_frame_bindings:
+        from .geometry_occlusion import observation_current
+        observation = robot.observations.get(target)
+        if observation and observation_current(robot, observation):
+            graph = observation['result']['geometry_occlusion']
+            if (graph['report_path'], graph['report_sha256']) in robot._pipeline_frame_bindings:
+                print(f'[perception_pipeline] {target} uses prepared task frame; perception skipped')
+                return SkillResult(True, data=observation['result'])
     camera = robot.context.camera
     memory = memory_for(camera)
     if memory is None:
@@ -67,6 +84,11 @@ def reuse_observation(kind):
             key = _key(robot, kind, target)
             try:
                 result = function(robot, *args, **kwargs)
+                if kind == 'container' and result.success:
+                    from .task_containers import complete_place_plan
+                    if not complete_place_plan(result.data):
+                        result = SkillResult(False, data={'failure_type': 'invalid_container_place_plan'},
+                            error='Container localization did not produce complete finite base-frame poses')
             except BaseException:
                 if memory is not None:
                     memory.commit(start_epoch, lambda: memory.invalidate('observation_exception'))

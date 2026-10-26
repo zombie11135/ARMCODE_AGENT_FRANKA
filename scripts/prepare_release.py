@@ -28,11 +28,15 @@ ROOT_FILES = {
     "capture_wrist_photos.sh",
     "run_robocasa_scene.sh", "run_occlusion_camera_test.sh",
     "calibrate_overhead_camera.sh", "test_aruco_pose.sh",
+    "test_gripper_contact.sh",
+    "ANYPLACE_REAL_STAGE1_REPORT.md", "ANYPLACE_REAL_STAGE2_REPORT.md",
+    "PERCEPTION_V2_INITIAL_REPORT.md",
 }
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".txt", ".yaml", ".yml", ".json", ".dot", ".svg"}
 EXTRA_FILES = {
     "config/local.env.example", "config/hardware/fake.override.yaml",
     "docs/multimodal_gate_architecture.png",
+    "skill_lab/test_segment_obj",
 }
 EXCLUDED_DIRS = {
     ".git", ".claude", ".idea", ".vscode", "__pycache__", ".pytest_cache",

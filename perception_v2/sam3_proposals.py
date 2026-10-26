@@ -10,6 +10,7 @@ import time
 
 import cv2
 import numpy as np
+from runtime.perception_pipeline import serialized_resource
 
 
 class SAM3Proposals:
@@ -33,6 +34,7 @@ class SAM3Proposals:
         self.processor = Sam3Processor(self.model, device=device, confidence_threshold=confidence)
         self.load_seconds = time.perf_counter()-started
 
+    @serialized_resource('gpu')
     def predict(self, color_bgr, prompts, *, min_mask_pixels=32):
         from PIL import Image
         torch = self.torch

@@ -7,6 +7,11 @@ from nesyro_gate.types import SceneMemory, SkillName, Step, TaskSpec
 GRASP_OCCLUSION_THRESHOLD = 0.35
 
 
+def has_fixed_container_plan(obj):
+    return bool(obj and obj.fixed_for_task and obj.placeable
+                and obj.object_type in {'plate', 'container'})
+
+
 def semantic_identity_score(obj):
     """Reference evidence is separate from OCR; legacy observations keep old weights."""
     if obj.identity_source == "reference_gallery" and obj.identity_verified:
@@ -93,6 +98,9 @@ def compute_csc(step: Step, scene_memory: SceneMemory, task_spec: TaskSpec) -> f
         plate = scene_memory.get_object(step.args["plate"])
         if plate is None:
             return 0.0
+        if has_fixed_container_plan(plate):
+            # Completed task-local localization, not a probability estimate.
+            return 1.0
         score = (
             0.5 * plate.ocr_match_score
             + 0.3 * plate.vlm_match_score

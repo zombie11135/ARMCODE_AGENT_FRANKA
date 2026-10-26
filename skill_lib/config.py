@@ -122,3 +122,6 @@ class SimpleRobotConfig:
     occlusion_active_view_wait_s: float = 0.8
     enable_geometry_occlusion: bool = False
     geometry_occlusion_buffer_poses_mmrad: List[List[float]] = field(default_factory=list)
+    enable_llm_occlusion_recovery: bool = False
+    geometry_occlusion_observation_budget: int = 2
+    geometry_occlusion_recovery_view_poses_mmrad: List[List[float]] = field(default_factory=list)

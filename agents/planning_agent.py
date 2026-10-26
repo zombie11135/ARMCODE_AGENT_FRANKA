@@ -46,6 +46,7 @@ PLANNER_SYSTEM_PROMPT = """
 执行技能绑定规则：
 - observe/grasp/place 节点必须填写同名 skill 和非空 args.target；不能只有动作文字却写 skill=null。
 - 每个 place 前必须有对应的 grasp；只有观察、尚不能抓取的计划不得包含 place。
+- 用户指定多个“物体 -> 容器”时，逐项保留对应关系；每项都生成 grasp -> place，不能只返回没有技能的 macro 节点。
 - 对抓放任务，必须直接生成 grasp/place 节点，不要生成 pick_medicine_and_place_to_container、find_and_grasp_medicine、place_to_container、use_cached_place_plan 等旧高层技能。
 - 常规顺序是 grasp("药名") -> place("容器")。只有失败恢复、目标看不清或需要近距离确认时，才在 grasp 前加入 observe("药名")。
 - grasp 只能用于“药盒/药品包装盒”，不要用于圆柱形管状物、瓶子、饮料、线材等非药盒物体。
@@ -558,6 +559,12 @@ class PlanningAgent:
         container_colors = [color for color in container_colors if color]
         if not container_colors:
             container_colors = [None]
+        explicit_pairs = ([] if self._is_all_medicine_task(task_goal) else
+                          self._extract_explicit_goal_transfers(task_goal))
+        pairs = explicit_pairs or [
+            (medicine, self._container_target(container_name, container_colors[index % len(container_colors)]))
+            for index, medicine in enumerate(medicine_queries)
+        ]
 
         graph = PlanGraph(
             goal=task_goal,
@@ -570,10 +577,13 @@ class PlanningAgent:
                 "medicine_queries": medicine_queries,
                 "container_name": container_name,
                 "container_colors": container_colors,
-                "classification_policy": "round_robin_by_detected_order",
+                "classification_policy": ("explicit_task_destinations" if explicit_pairs else
+                                          "round_robin_by_detected_order"),
+                "target_container_pairs": [dict(medicine_query=medicine, container_target=container)
+                                           for medicine, container in pairs],
             },
         )
-        if len(container_colors) > 1:
+        if not explicit_pairs and len(container_colors) > 1:
             graph.constraints.append(
                 "任务要求分类到多个容器，但未提供明确分类规则；当前按识别到的药盒顺序轮流分配到目标颜色盘子。"
             )
@@ -593,9 +603,7 @@ class PlanningAgent:
         graph.root_id = root.node_id
 
         previous = root.node_id
-        for index, medicine_query in enumerate(medicine_queries, start=1):
-            color = container_colors[(index - 1) % len(container_colors)]
-            container_target = self._container_target(container_name, color)
+        for index, (medicine_query, container_target) in enumerate(pairs, start=1):
             grasp_id = f"n{2 * index - 1}"
             place_id = f"n{2 * index}"
             graph.add_node(
@@ -644,23 +652,41 @@ class PlanningAgent:
             return graph
 
         planned = []
-        for node in graph.nodes:
+        planned_pairs = []
+        holding = None
+        for node in self._topological_nodes(graph):
             args = node.args or {}
             value = args.get("medicine_query") or args.get("query")
             if not value and node.skill == "grasp":
                 value = args.get("target")
             if value:
                 planned.append(str(value))
+            if node.skill == "grasp":
+                holding = str(value or "").strip()
+            elif node.skill == "place" and holding:
+                destination = str(args.get("target") or args.get("container_name") or "").lower()
+                container = self._container_target(
+                    self._extract_container_name(destination, ""),
+                    args.get("container_color") or self._extract_container_color(destination, ""),
+                )
+                planned_pairs.append((holding, container))
+                holding = None
+            elif node.skill == "pick_medicine_and_place_to_container" and value:
+                planned_pairs.append((str(value), self._container_target(
+                    args.get("container_name") or "container", args.get("container_color"))))
+        expected_pairs = ([] if self._is_all_medicine_task(task_goal) else
+                          self._extract_explicit_goal_transfers(task_goal))
         missing = [name for name in medicine_queries if name not in planned]
-        if not missing and len(planned) >= len(medicine_queries):
+        if (not missing and len(planned) >= len(medicine_queries)
+                and all(pair in planned_pairs for pair in expected_pairs)):
             return graph
 
         expanded = self._plan_multi_pick_place_heuristic(
             task_goal=task_goal,
             scene_text=scene_text,
             constraints=[
-                *constraints,
-                "原始规划未覆盖所有已识别药盒，已自动展开为多目标抓放计划。",
+                *dict.fromkeys([*graph.constraints, *constraints]),
+                "原始规划未完整绑定任务指定的物体和目标容器，已展开为对应的多目标抓放计划。",
             ],
             medicine_queries=medicine_queries,
         )
@@ -778,13 +804,40 @@ VDM 场景描述：
 
     @classmethod
     def _extract_explicit_goal_medicines(cls, task_goal: str) -> List[str]:
-        match = re.search(
-            r"(?:将|把)(.+?)(?:放到|放入|放置到|移动到|拿到)",
+        matches = re.finditer(
+            r"(?:将|把)(.+?)(?:放置到|放到|放入|放进|移动到|拿到)",
             str(task_goal or ""),
         )
-        if not match:
-            return []
-        fragments = re.split(r"(?:和|以及|及|、|,|，)", match.group(1))
+        queries = []
+        for match in matches:
+            for name in cls._split_explicit_goal_names(match.group(1)):
+                if name not in queries:
+                    queries.append(name)
+        return queries
+
+    @classmethod
+    def _extract_explicit_goal_transfers(cls, task_goal: str) -> List[tuple[str, str]]:
+        """Read each user-specified destination locally, never distribute by color order."""
+        matches = re.finditer(
+            r"(?:将|把)(.+?)(?:放置到|放到|放入|放进|移动到|拿到)(.+?)"
+            r"(?=[，,。；;\n]|(?:然后|接着|并且|并|再)?\s*(?:将|把)|$)",
+            str(task_goal or ""),
+        )
+        pairs = []
+        for match in matches:
+            destination = match.group(2).strip().lower()
+            if len(cls._extract_container_colors(destination)) > 1:
+                return []  # A shared list of destinations is not an explicit per-object binding.
+            container = cls._container_target(
+                cls._extract_container_name(destination, ""),
+                cls._extract_container_color(destination, ""),
+            )
+            pairs.extend((name, container) for name in cls._split_explicit_goal_names(match.group(1)))
+        return pairs
+
+    @classmethod
+    def _split_explicit_goal_names(cls, text: str) -> List[str]:
+        fragments = re.split(r"(?:和|以及|及|、|,|，)", text)
         queries = []
         for fragment in fragments:
             name = re.sub(r"^(?:药盒|药品|药物)", "", fragment.strip())
@@ -866,7 +919,7 @@ VDM 场景描述：
         for canonical, aliases in color_aliases:
             for alias in aliases:
                 for container_token in container_tokens:
-                    if f"{alias}{container_token}" in text or f"{alias}的{container_token}" in text:
+                    if re.search(rf"{re.escape(alias)}(?:的|\s)*{re.escape(container_token)}", text):
                         return canonical
 
         return None

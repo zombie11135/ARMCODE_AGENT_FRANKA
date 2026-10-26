@@ -34,14 +34,19 @@ class SimpleExecutionRuntime:
 
     def __init__(self, config):
         self.config = config
+        self.replan_attempts = 0
+        self.replan_paths = {}
 
     def run(self, actions: List[SimpleAction]) -> bool:
+        if not actions:
+            raise ValueError('规划没有可执行动作，未启动相机或机械臂执行会话。')
         from hardware.runtime import require_task_geometry
         require_task_geometry(self.config)
         print("\n[executing] 使用简短技能执行")
         context, camera_service = self._build_execution_context()
         arm = None
         hardware = None
+        perception_pipeline = None
 
         try:
             camera_service.start()
@@ -56,6 +61,11 @@ class SimpleExecutionRuntime:
                     execute=self.config.execute_robot, agent=True,
                     speed_scaling=getattr(self.config, "arm_speed_scaling", None))
                 hardware.attach(context, monitor_gripper=(self.config.execute_robot and not self.config.disable_grip))
+                if self.config.execute_robot and not self.config.disable_grip:
+                    session = hardware.gripper.session_info()
+                    print('[FR3] 夹爪通信:', session.get('communication_mode', 'thread'),
+                          'worker_pid='+str(session.get('worker_pid')),
+                          'state_timeout_s='+str(session.get('state_timeout_s')))
             elif self.config.execute_robot:
                 arm = self._init_arm(self.config.xarm_ip)
                 context.xarm = arm
@@ -76,14 +86,18 @@ class SimpleExecutionRuntime:
                     )
                     return False
 
-            self._capture_task_home_view(context, camera_service)
+            captures = self._capture_task_home_view(context, camera_service)
+            from runtime.task_perception_pipeline import start_task_perception_pipeline
+            perception_pipeline = start_task_perception_pipeline(robot, actions, captures, self.config)
 
             if not self._preobserve_containers(robot, context.camera, actions):
                 self._save_memory(robot, completed_actions=[])
                 return False
 
-            if self.config.execute_robot:
-                robot.home()
+            # preobserve_containers already returns home after each container,
+            # including the last. Avoid another identical MoveIt request here.
+            if perception_pipeline is not None:
+                perception_pipeline.publish()
 
             return self._run_actions(
                 robot=robot,
@@ -92,6 +106,8 @@ class SimpleExecutionRuntime:
                 actions=actions,
             )
         finally:
+            if perception_pipeline is not None:
+                perception_pipeline.close()
             if hardware is not None:
                 try:
                     if (self.config.execute_robot and not self.config.disable_grip
@@ -154,14 +170,36 @@ class SimpleExecutionRuntime:
         return resolved
 
     def _build_robot(self, context) -> SimpleRobotActions:
+        context.task_goal = getattr(self.config, 'goal', '')
         pose_options = {}
+        startup_pose = None
+        buffers = [list(pose) for pose in getattr(self.config, 'geometry_occlusion_buffer_poses_mmrad', [])]
+        buffer_positions = getattr(self.config, 'geometry_occlusion_buffer_positions_mm', [])
+        if buffer_positions:
+            import math
+            if not getattr(self.config, 'hardware_config_path', None):
+                raise ValueError('缓冲位 XYZ 自动补齐朝向仅支持 FR3 硬件配置')
+            if any(len(xyz) != 3 or not all(math.isfinite(float(v)) for v in xyz)
+                   for xyz in buffer_positions):
+                raise ValueError('缓冲位法兰 XYZ 必须是三个有限的毫米数值')
         if getattr(self.config, "hardware_config_path", None):
             from hardware.config import load_config
-            home = load_config(self.config.hardware_config_path).arm.home_pose
-            if home is None:
-                home = context.require("arm").get_pose().values
-                print("[FR3] 本轮 home 使用启动时的实际法兰姿态:", home)
+            from runtime.home_pose import home_pose_session
+            configured_home = load_config(self.config.hardware_config_path).arm.home_pose
+            def read_startup_pose():
+                nonlocal startup_pose
+                startup_pose = context.require('arm').get_pose().values
+                return startup_pose
+            session = home_pose_session(self.config)
+            home, _ = session.resolve(self.config.hardware_config_path, configured_home, read_startup_pose)
+            print('[FR3] 会话 home（基座系法兰 m/rad）:', home, 'source='+session.source)
             pose_options["home_pose_mmrad"] = [v * 1000 for v in home[:3]] + list(home[3:])
+            if buffer_positions:
+                if startup_pose is None:
+                    startup_pose = context.require('arm').get_pose().values
+                for xyz in buffer_positions:
+                    buffers.append([float(v) for v in xyz] + list(startup_pose[3:]))
+                print('[FR3] 清障缓冲法兰位姿（毫米/弧度，启动时朝向）:', buffers)
         gripper_open = None
         gripper_close = None
         if self.config.execute_robot and not self.config.disable_grip:
@@ -192,7 +230,10 @@ class SimpleExecutionRuntime:
                 **pose_options,
                 use_sam_for_grasp=getattr(self.config, "use_sam_for_grasp", False),
                 enable_geometry_occlusion=getattr(self.config, 'enable_geometry_occlusion', False),
-                geometry_occlusion_buffer_poses_mmrad=getattr(self.config, 'geometry_occlusion_buffer_poses_mmrad', []),
+                geometry_occlusion_buffer_poses_mmrad=buffers,
+                enable_llm_occlusion_recovery=getattr(self.config, 'enable_llm_occlusion_recovery', False),
+                geometry_occlusion_observation_budget=getattr(self.config, 'geometry_occlusion_observation_budget', 2),
+                geometry_occlusion_recovery_view_poses_mmrad=getattr(self.config, 'geometry_occlusion_recovery_view_poses_mmrad', []),
                 execute=self.config.execute_robot,
                 xarm_ip=self.config.xarm_ip,
                 handeye_config_path=self.config.handeye_config,
@@ -380,7 +421,7 @@ class SimpleExecutionRuntime:
             gripper_close=gripper_close,
         )
 
-    def _capture_task_home_view(self, context, camera_service) -> None:
+    def _capture_task_home_view(self, context, camera_service):
         from runtime.observation_memory import invalidate_camera
         invalidate_camera(camera_service, 'new_task')
         task_global = (None if getattr(camera_service, 'active_camera_names', None) == ('wrist',)
@@ -391,6 +432,7 @@ class SimpleExecutionRuntime:
                 global_capture=task_global,
                 wrist_capture=task_wrist,
             )
+        return {'wrist': task_wrist, 'global': task_global}
 
     def _preobserve_containers(self, robot, camera, actions: List[SimpleAction]) -> bool:
         print("[executing] 预观测所有目标容器。")
@@ -469,14 +511,16 @@ class SimpleExecutionRuntime:
             return None
         return round(float(value), ndigits)
 
-    def _run_actions(self, robot, context, camera_service, actions: List[SimpleAction]) -> bool:
+    def _run_actions(self, robot, context, camera_service, actions: List[SimpleAction],
+                     *, completed_actions=None, start_index=0) -> bool:
         from services.object_names import display_name
         current_grasp: Optional[str] = None
-        completed_actions: List[Dict[str, Any]] = []
+        completed_actions = list(completed_actions or [])
         last_gated_result: Optional[float] = None
         total_steps = max(1, len(actions))
-        for index, action in enumerate(actions, start=1):
+        for index, action in enumerate(actions[start_index:], start=start_index + 1):
             print(f"[executing] {index}/{len(actions)} {action.op}({display_name(context, action.target)})")
+            gate_blocked = False
 
             if action.op in {"observe", "grasp", "place"}:
                 gate_result = robot.gate_before_action(
@@ -489,6 +533,7 @@ class SimpleExecutionRuntime:
                 )
                 if not gate_result.success:
                     result = gate_result
+                    gate_blocked = True
                 else:
                     result = None
             else:
@@ -564,7 +609,7 @@ class SimpleExecutionRuntime:
                     primitive_success=False,
                     execution_failure_type=failure_type,
                 )
-                self._write_failure_report(
+                report = self._write_failure_report(
                     failed_action=action,
                     medicine_query=failure_medicine_query,
                     failure_type=failure_type,
@@ -574,6 +619,17 @@ class SimpleExecutionRuntime:
                     evidence=result.data,
                 )
                 self._save_memory(robot, completed_actions=completed_actions)
+                if gate_blocked and action.op == 'grasp' and current_grasp is None:
+                    from agents.same_session_replanning import repair_gate_before_grasp
+                    try:
+                        repaired = repair_gate_before_grasp(
+                            self, robot, context, completed_actions, report)
+                    except (OSError, ValueError) as error:
+                        print(f'[replanning] stopped: {error}')
+                        repaired = None
+                    if repaired is not None:
+                        return self._run_actions(robot, context, camera_service, repaired,
+                            completed_actions=completed_actions, start_index=len(completed_actions))
                 return False
 
             if action.op in {"observe", "grasp", "place"}:
@@ -817,6 +873,10 @@ class SimpleExecutionRuntime:
             "observations": self._compact_observations(robot.observations),
             "place_plans": self._safe_json(robot.place_plans),
             "place_counts": self._safe_json(robot.place_counts),
+            "geometry_recovery": self._safe_json(dict(
+                clear_counts=robot.occlusion_recovery_counts,
+                buffer_slots_used=robot.geometry_buffer_slots_used,
+                state=robot.geometry_recovery_state)),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
         try:
@@ -1026,6 +1086,7 @@ class SimpleExecutionRuntime:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "automatic_replan": evidence.get('automatic_replan',
                                               not getattr(self.config, 'enable_geometry_occlusion', False)),
+            "same_session_replan_attempts": self.replan_attempts,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

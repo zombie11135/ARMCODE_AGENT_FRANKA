@@ -9,7 +9,7 @@ import pytest
 
 from hardware.config import DEFAULT_CONFIG, GripperConfig, HardwareConfig, load_config
 from hardware.gripper_contact import ContactSettings, EmptyBaseline, identity
-from hardware.robotiq import GripperCurrentLimitError, GripperError, GripperStatus, Robotiq2F85
+from hardware.robotiq import GripperError, GripperStatus, Robotiq2F85
 from hardware.robotiq_contact import AgentContactGripper, load_contact_close_setup
 from hardware.runtime import Hardware, build_hardware, require_task_geometry
 from test_gripper_contact import FakeSerial
@@ -88,16 +88,47 @@ def test_open_invalidates_hold_hint_and_next_close_still_uses_baseline(device):
     assert driver.close_completed(driver.close())
 
 
-def test_current_ceiling_propagates_failure_without_full_close_or_retry(device):
+def test_current_ceiling_completes_close_after_confirmed_stop_without_retry(device):
     driver, serial, _ = device
     serial.current_fn = lambda p: 100 if p >= 70 else 20
-    with pytest.raises(GripperCurrentLimitError):
-        driver.close()
+    state = driver.close()
     assert driver.last_contact_close['outcome'] == 'current_limit'
     assert driver.last_contact_close['stop_confirmed']
-    assert not driver.close_completed(driver.assert_healthy())
-    assert not driver.last_motion_feedback['completed']
+    assert driver.close_completed(state)
+    assert driver.last_motion_feedback['completed']
+    assert not driver.last_motion_feedback['grasp_verified']
+    assert driver.may_be_holding_object()  # A cleanup hint even without recorded contact.
+    assert driver.last_contact_close['contact'] is None
+    assert driver.last_motion_feedback['peak_current_ma'] == 100
     assert serial.commands == [(9, 225, 0, 0), (1, 225, 0, 0)]
+
+
+@pytest.mark.parametrize('failure', ['unconfirmed_stop', 'report_error', 'stop_error',
+                                    'still_moving', 'device_fault', 'communication_error'])
+def test_current_limit_never_hides_stop_or_device_failure(device, failure):
+    driver, _, factory = device
+    report = dict(outcome='current_limit', stop_confirmed=True, log_path='synthetic.json',
+                  grasp_verified=False)
+    state = GripperStatus(True, False, 3, 0, 0, 225, 70, 0)
+    if failure == 'unconfirmed_stop':
+        report['stop_confirmed'] = False
+    elif failure in ('report_error', 'stop_error'):
+        report['error' if failure == 'report_error' else 'stop_error'] = 'simulated failure'
+    elif failure == 'still_moving':
+        state = replace(state, go_to=True)
+    def trial(*args, **kwargs):
+        driver.last_trial = report
+        return report
+    with patch.object(driver, 'run_trial', side_effect=trial), \
+         patch.object(driver, 'assert_healthy', return_value=state) as healthy:
+        if failure in ('device_fault', 'communication_error'):
+            healthy.side_effect = GripperError(failure)
+        with pytest.raises(GripperError):
+            driver.close()
+    assert not driver._contact_close_completed
+    assert not driver.last_motion_feedback['completed']
+    assert not driver.may_be_holding_object()
+    factory.assert_not_called()
 
 
 def test_no_contact_completion_preserves_existing_agent_semantics(device):
@@ -156,21 +187,25 @@ def test_missing_baseline_never_falls_back_to_old_close(setup):
 
 
 def test_profile_paths_resolve_relative_and_constructor_dispatch_is_offline(setup):
+    from hardware.gripper_process import ProcessGripper
     cfg, _ = setup
     resolved = load_contact_close_setup(cfg)
     assert resolved.output_dir == Path(cfg.contact_close_file).parent/'logs'
     settings = replace(load_config(DEFAULT_CONFIG), gripper=cfg)
     with patch('hardware.runtime.load_config', return_value=settings):
         hardware = build_hardware(agent=True)
-        assert isinstance(hardware.gripper, AgentContactGripper)
-        assert hardware.gripper._serial is None
+        assert isinstance(hardware.gripper, ProcessGripper)
+        assert hardware.gripper._manager is None
+        assert hardware.gripper.config.keepalive_interval_s == .05
         hardware.disconnect()
         require_task_geometry(SimpleNamespace(hardware_config_path='mocked.yaml'))
     legacy = replace(settings, gripper=replace(cfg, contact_close_file=None))
     with patch('hardware.runtime.load_config', return_value=legacy):
         hardware = build_hardware(agent=True)
-        assert type(hardware.gripper) is Robotiq2F85
+        assert isinstance(hardware.gripper, ProcessGripper)
+        assert hardware.gripper._manager is None
         hardware.disconnect()
+        assert type(build_hardware(agent=False).gripper) is Robotiq2F85
 
 
 def test_hardware_close_callback_accepts_deliberately_stopped_driver(device):
@@ -206,7 +241,7 @@ def test_agent_callback_closes_once_and_allows_lift_after_contact_stop(device):
     arm.motion_guard()  # Stopped close is healthy for subsequent transport.
 
 
-def test_agent_does_not_lift_after_current_cutoff(device):
+def test_agent_continues_to_lift_after_confirmed_current_stop(device):
     from agents.simple_agent_system import SimpleAgentSystemConfig
     from agents.simple_execution_runtime import SimpleExecutionRuntime
     from core.context import RuntimeContext
@@ -224,10 +259,15 @@ def test_agent_does_not_lift_after_current_cutoff(device):
     arm.get_pose.reset_mock()
     plan = dict(approach_pose_mmrad=[300, 0, 430, 3.14, 0, -1.57],
                 best_grasp_xarm_mmrad=[300, 0, 350, 3.14, 0, -1.57])
-    with pytest.raises(GripperCurrentLimitError):
-        execute_grasp(context, plan, robot.gripper_open, robot.gripper_close)
-    assert arm.move_pose.call_count == 2  # Approach + grasp; no lift.
-    arm.get_pose.assert_not_called()
+    result = execute_grasp(context, plan, robot.gripper_open, robot.gripper_close)
+    assert result['success'] and result['gripper_close_completed']
+    assert arm.move_pose.call_count == 3  # Approach + grasp + lift.
+    assert arm.move_pose.call_args.args[0].z == pytest.approx(.4)
+    arm.get_pose.assert_called_once_with()
+    assert driver.last_contact_close['outcome'] == 'current_limit'
+    assert not driver.last_contact_close['grasp_verified']
+    assert not driver.assert_healthy().go_to
+    arm.motion_guard()
 
 
 def test_legacy_completion_still_checks_true_hardware_flags():

@@ -180,7 +180,9 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                 blocker_bbox_shrink_ratio,
             )
             valid_ratio = _depth_valid_ratio(depth, planned_bbox)
-            if valid_ratio is not None and valid_ratio < float(min_depth_valid_ratio):
+            # The graph-based agent keeps coverage as a diagnostic only. Legacy
+            # bbox selection retains its separate foreground-depth policy.
+            if graph_mask is None and valid_ratio is not None and valid_ratio < float(min_depth_valid_ratio):
                 return _failure(
                     "occlusion_recovery_depth_invalid",
                     (
@@ -239,7 +241,8 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                 mask_npy_path=foreground.get("mask_npy_path"),
             )
             pose_options = dict(grasp_pose_options or {})
-            allowed = {'target_rx', 'target_ry', 'max_rx_tilt_deg', 'max_ry_tilt_deg', 'lam_rx', 'lam_ry'}
+            allowed = {'target_rx', 'target_ry', 'target_rz', 'max_rx_tilt_deg', 'max_ry_tilt_deg',
+                       'lam_rx', 'lam_ry', 'lam_rz', 'enable_pose_fix'}
             if set(pose_options) - allowed:
                 raise ValueError(f"Unknown grasp pose options: {sorted(set(pose_options) - allowed)}")
             plan_result = self._plan_grasp(
@@ -310,9 +313,17 @@ class ClearOcclusionToBufferSkill(BaseSkill):
                 message="遮挡物已搬运到 buffer。",
             )
         except Exception as exc:
+            diagnostics = None
+            gripper = getattr(self.context, 'gripper', None)
+            if gripper is not None:
+                try:
+                    diagnostics = gripper.session_info()
+                except Exception as diagnostic_error:
+                    diagnostics = dict(error_type=type(diagnostic_error).__name__)
             return _failure(
                 "occlusion_recovery_error",
                 f"清障恢复异常：{exc}",
+                gripper_session=diagnostics,
             )
 
     def _detect_blocker_candidates(
@@ -439,7 +450,7 @@ def _graph_blocker(context, observation, evidence, depth):
     verify_binding(report['source_binding'])
     expected = choose_blocker(report, allow_search=bool(evidence.get('exploratory')),
                               max_image_fraction=evidence['max_image_fraction'],
-                              min_depth_fraction=evidence['min_depth_fraction'])
+                              preferred_node_id=evidence['node_id'])
     node = expected.get('blocker')
     if (node is None or node['node_id'] != evidence['node_id']
             or expected.get('target_node_id') != evidence.get('target_node_id')):
@@ -453,8 +464,8 @@ def _graph_blocker(context, observation, evidence, depth):
     mask = np.load(node['visible_mask_path'], allow_pickle=False).astype(bool)
     if mask.shape != depth.shape or not mask.any():
         raise ValueError('Blocker mask must match the observed depth')
-    if np.count_nonzero(mask & np.isfinite(depth) & (depth > 0))/mask.sum() < .8:
-        raise ValueError('Insufficient measured depth on the blocker visible surface')
+    if not np.any(mask & np.isfinite(depth) & (depth > 0)):
+        raise ValueError('No measured depth on the blocker visible surface')
     grasp_input = observation.get('grasp_input') or {}
     for key in ('color_path', 'depth_path', 'depth_npy_path', 'points_path'):
         binding = report['source_binding'].get(key)

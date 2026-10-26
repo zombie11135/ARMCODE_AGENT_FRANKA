@@ -58,10 +58,14 @@ def gate_before_action(
             error=f"NeSyRo Gate blocked place({action.target}): gripper is not holding an object.",
         )
 
+    if action.op == 'place':
+        from .task_containers import recall_container
+        recall_container(robot, action.target)
+
     if (action.op == 'place' and robot.config.enable_geometry_occlusion
             and not robot._has_cached_observation(action.target)):
         container_result = robot._run_gate_probe(action=action, current_holding=current_holding,
-            suggested_probe='observe_container', reason='scene mutation invalidated the container plan')
+            suggested_probe='observe_container', reason='missing container plan for this task')
         if not container_result.success:
             return container_result
 
@@ -91,8 +95,18 @@ def gate_before_action(
 
     from nesyro_gate import ProbeAction
 
-    for _ in range(max_attempts):
-        scene_memory = robot.build_scene_memory(current_holding=current_holding)
+    for attempt in range(max_attempts):
+        geometry_prepared_target = None
+        if action.op == 'grasp' and robot.config.enable_geometry_occlusion:
+            if attempt:
+                # A probe can replace the image; validate its new graph before
+                # treating it as the current pre-grasp geometry evidence.
+                geometry_result = prepare_grasp(robot, action.target)
+                if not geometry_result.success:
+                    return geometry_result
+            geometry_prepared_target = action.target
+        scene_memory = robot.build_scene_memory(
+            current_holding=current_holding, geometry_prepared_target=geometry_prepared_target)
         step = robot._action_to_gate_step(action, current_holding=current_holding)
         task_spec = robot._action_to_gate_task_spec(
             action=action,
@@ -122,6 +136,9 @@ def gate_before_action(
             gate_result=result,
             scene_memory=scene_memory,
         )
+        if geometry_prepared_target:
+            record['occlusion_evidence_source'] = 'validated_wrist_relation_graph'
+            record['legacy_bbox_occlusion_heuristics_used'] = False
         gate_attempts.append(record)
         robot._append_gate_trace(record)
         robot._last_gate_decision_id = robot._log_gate_decision(
@@ -269,7 +286,8 @@ def gate_before_action(
     )
 
 
-def build_scene_memory(robot: SimpleRobotActions, current_holding: Optional[str] = None):
+def build_scene_memory(robot: SimpleRobotActions, current_holding: Optional[str] = None,
+                       *, geometry_prepared_target: Optional[str] = None):
     """Build a SceneMemory snapshot from cached observations and plans."""
 
     from nesyro_gate import build_scene_memory_from_simple_robot
@@ -280,6 +298,7 @@ def build_scene_memory(robot: SimpleRobotActions, current_holding: Optional[str]
         place_counts=robot.place_counts,
         gripper_holding=current_holding,
         probe_counts=robot.gate_probe_counts,
+        geometry_prepared_target=geometry_prepared_target,
     )
 
 
@@ -432,6 +451,11 @@ def _run_gate_probe(
 
     probe_target = action.target
     if action.op == "place":
+        from .task_containers import recall_container
+        fixed = recall_container(robot, probe_target)
+        if fixed is not None:
+            return SkillResult(True, data=dict(gate_probe='reuse_task_container',
+                probe_target=probe_target, probe_result=fixed.data, container_plan_reused=True))
         robot._invalidate_container_cache(action.target)
 
     print(

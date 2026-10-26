@@ -214,4 +214,50 @@ def test_shipped_config_is_loadable_and_selects_production_encoder():
     root = Path(__file__).resolve().parents[1]
     cfg = load_settings(root/'config/perception/references.example.yaml')
     assert cfg.encoder_model == 'mobileclip2_b' and cfg.recognition_policy == 'reference_only'
-    assert (cfg.min_similarity, cfg.min_class_margin, cfg.top_k_references) == (.8, .02, 3)
+    assert (cfg.min_similarity, cfg.min_class_margin, cfg.top_k_references) == (.75, .02, 3)
+
+
+def test_rebuilt_bank_round_trips_by_identity_without_loading_models(scene, tmp_path):
+    from scripts.rebuild_reference_bank import rebuild_bank
+    context, _, _, _ = scene
+    service = context.object_references
+
+    class Encoder:
+        def encode(self, images, batch_size=16):
+            features = np.zeros((len(images), 512), dtype=np.float32)
+            # Distinct embeddings ensure incorrect row associations cannot pass this test.
+            for index in range(len(images)):
+                features[index, index] = 2.
+            return features
+
+    output = tmp_path/'rebuilt'
+    result = rebuild_bank(service.settings, output, encoder=Encoder(),
+        expected_checkpoint_sha256=image_digest(service.settings.checkpoint))
+    assert result['feature_shape'] == [2, 512] and result['production_loader_verified']
+    data = service.gallery.read()
+    data['objects'].reverse()
+    loader = ObjectReferenceService(replace(service.settings, vector_library_dir=str(output)))
+    features = loader._prepared_features(data)
+    assert features.argmax(axis=1).tolist() == [1, 0]
+    assert loader._encoder is None
+    with pytest.raises(FileExistsError):
+        rebuild_bank(service.settings, output, encoder=Encoder())
+
+
+@pytest.mark.parametrize('damage', ['checkpoint', 'reference'])
+def test_rebuild_rejects_changed_inputs_before_encoding(scene, tmp_path, damage):
+    from scripts.rebuild_reference_bank import rebuild_bank
+    context, _, _, _ = scene
+    service = context.object_references
+    expected_hash = image_digest(service.settings.checkpoint)
+    if damage == 'checkpoint':
+        Path(service.settings.checkpoint).write_bytes(b'other weights')
+    else:
+        ref = service.gallery.read()['objects'][0]['references'][0]
+        (service.gallery.directory/ref['path']).write_bytes(b'changed image')
+    encoder = Mock()
+    output = tmp_path/'rejected'
+    with pytest.raises(ValueError):
+        rebuild_bank(service.settings, output, encoder=encoder, expected_checkpoint_sha256=expected_hash)
+    encoder.encode.assert_not_called()
+    assert not output.exists()

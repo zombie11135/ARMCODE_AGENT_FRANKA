@@ -228,7 +228,8 @@ class AgentIntegrationTests(unittest.TestCase):
 
         relative = estimate([.3, .1, .01], (np.pi, 0., 0.), self.transforms,
                             replace(self.config.arm, place_flange_z_m=None))
-        self.assertAlmostEqual(relative['place_pose_mmrad'][2], 420.)
+        self.assertAlmostEqual(relative['place_pose_mmrad'][2],
+                               (0.01 + 0.25 + self.transforms.flange_T_tcp[2, 3]) * 1000.)
         self.assertEqual(relative['place_height_mode'], 'container_relative')
         legacy = estimate([.3, .1, .01], (np.pi, 0., 0.), None, self.config.arm)
         self.assertAlmostEqual(legacy['place_pose_mmrad'][2], 260.)

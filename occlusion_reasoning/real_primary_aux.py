@@ -86,8 +86,8 @@ def _view_summary(directory, role):
             issues = []
             if mask[0].any() or mask[-1].any() or mask[:, 0].any() or mask[:, -1].any():
                 issues.append('truncated_at_image_border')
-            if node['quality']['depth_coverage_ratio'] < .8:
-                issues.append('low_depth_coverage')
+            if node['quality']['depth_supported_pixels'] == 0:
+                issues.append('no_depth_support')
             if node['quality']['overlap_with_other_nodes_pixels']/max(1, node['quality']['raw_mask_pixels']) > .05:
                 issues.append('overlapping_visible_mask_assignments')
             nodes.append({**node, 'display_id': f'N{index}', 'camera_id': camera,

@@ -6,6 +6,7 @@ remain with the existing agent runtime; fixed-view evidence is never fused.
 from pathlib import Path
 import hashlib
 import json
+import shutil
 import uuid
 
 import cv2
@@ -104,17 +105,18 @@ class WristOcclusionService:
                       depth_path=str((root/camera/'depth.png').resolve()),
                       depth_npy_path=str((root/camera/'depth_m.npy').resolve()),
                       camera_name=camera, depth_scale=float(scale))
+        if capture.get('points_path'):
+            points = root/camera/'points.npy'
+            shutil.copyfile(capture['points_path'], points)
+            frozen['points_path'] = str(points.resolve())
         return frozen, root
 
-    @serialized_resource('gpu')
     def analyze(self, capture, root, selected=None):
         from perception_v2.proposal_refinement import (
             DEFAULT_OCCLUSION_PROMPTS, refine_proposals, select_visible_hypotheses)
         from occlusion_reasoning.real_single_view import save_view
         from occlusion_reasoning.real_primary_aux import _view_summary
-        if self.backend is None:
-            from perception_v2.sam3_proposals import SAM3Proposals
-            self.backend = SAM3Proposals(self.checkpoint, device=self.device)
+        self._ensure_backend()
         camera, root = capture['camera_name'], Path(root)
         color = cv2.imread(capture['color_path'])
         candidates, backend, raw = refine_proposals(color, DEFAULT_OCCLUSION_PROMPTS, self.backend)
@@ -143,12 +145,38 @@ class WristOcclusionService:
         result['report_sha256'] = sha(result['report_path'])
         return result
 
+    @serialized_resource('gpu')
+    def _ensure_backend(self):
+        if self.backend is None:
+            from perception_v2.sam3_proposals import SAM3Proposals
+            self.backend = SAM3Proposals(self.checkpoint, device=self.device)
 
-def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_depth_fraction=.8):
+
+def blocking_quality_issues(node):
+    """Require usable input, leaving visible-surface graspability to the planner.
+
+    Coverage, image-border truncation and mask-overlap warnings are diagnostic,
+    including in historical reports. Do not turn every quality annotation into
+    an execution veto or change the original, file-bound evidence.
+    """
+    issues = [issue for issue in node.get('quality_issues', [])
+              if issue in ('empty_mask', 'no_depth_support')]
+    quality = node['quality']
+    if quality.get('empty_mask') or quality.get('raw_mask_pixels') == 0:
+        issues.append('empty_mask')
+    surface = node.get('observed_surface_camera') or {}
+    if quality.get('depth_supported_pixels') == 0 or surface.get('point_count') == 0:
+        issues.append('no_depth_support')
+    return list(dict.fromkeys(issues))
+
+
+def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_depth_fraction=None,
+                   preferred_node_id=None):
     """Choose an exposed graph ancestor of the target, never an unrelated pair.
 
     With explicit search enabled, an unlocalized target may use an exposed root
     of an observed relation as a bounded exploratory action, not proof of hiding.
+    min_depth_fraction is a retired compatibility keyword and has no effect.
     """
     view = report['primary']
     nodes = {n['node_id']: n for n in view['relation_graph']['nodes']}
@@ -163,7 +191,7 @@ def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_dep
     if exploratory and not allow_search:
         return dict(status=report['target_association']['status'], blocker=None)
     if target is not None and not predecessors[target]:
-        quality = nodes[target]['quality_issues']
+        quality = blocking_quality_issues(nodes[target])
         status = 'target_quality_insufficient' if quality else 'no_occlusion_evidence'
         return dict(status=status, blocker=None, target_node_id=target)
     ancestors = set()
@@ -197,14 +225,19 @@ def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_dep
     for node in roots:
         q = node['quality']
         image_area = view['frame']['width']*view['frame']['height']
-        if (node['quality_issues'] or q['depth_coverage_ratio'] < min_depth_fraction
+        if (blocking_quality_issues(node)
                 or q['raw_mask_pixels']/image_area > max_image_fraction):
             continue
         eligible.append(node)
     if not eligible:
         return dict(status='blocker_quality_insufficient', blocker=None)
     eligible.sort(key=lambda n: (-n['detection_score'], n['node_id']))
+    if preferred_node_id is not None:
+        if preferred_node_id not in {n['node_id'] for n in eligible}:
+            raise ValueError('Preferred blocker is not an eligible exposed ancestor/search candidate')
+        eligible.sort(key=lambda n: n['node_id'] != preferred_node_id)
     blocker = eligible[0]
     return dict(status='exploratory_clear_candidate' if exploratory else 'target_occluded',
                 blocker=blocker, target_node_id=target, exploratory=exploratory,
-                basis='single_view_possible_occlusion_not_grasp_blocking_proof', confirmed=False)
+                basis='single_view_possible_occlusion_not_grasp_blocking_proof', confirmed=False,
+                eligible_node_ids=[n['node_id'] for n in eligible])

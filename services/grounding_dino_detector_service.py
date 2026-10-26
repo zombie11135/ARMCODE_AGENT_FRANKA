@@ -490,7 +490,8 @@ class GroundingDINODetectorService:
         """
         药盒过滤规则：
         - 面积不能太小，过滤绿色小方块这类误检
-        - 药盒通常是矩形，不是很小的正方形
+        - 保留接近正方形的框：倾斜摆放的长方体药盒也会有近正方形的水平包围框
+        - 仍过滤过大的区域及过于细长的框
         """
         x1, y1, x2, y2 = bbox
         w = x2 - x1
@@ -509,9 +510,6 @@ class GroundingDINODetectorService:
             return False
 
         if area_ratio > 0.55:
-            return False
-
-        if aspect < 1.15:
             return False
 
         if aspect > 6.5:

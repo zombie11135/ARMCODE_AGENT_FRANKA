@@ -20,8 +20,8 @@ cameras:
   mode: wrist  # dual enables the fixed/global stream as well.
   global_serial: SET_GLOBAL_CAMERA_SERIAL
   wrist_serial: SET_WRIST_CAMERA_SERIAL
-  width: 640
-  height: 480
+  width: 1280
+  height: 720
   fps: 6
   show_window: false
 observation_cache:

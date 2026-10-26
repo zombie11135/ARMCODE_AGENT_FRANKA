@@ -244,7 +244,7 @@ def test_equivalence_through_scene_memory_builder_observation() -> None:
             "grasp_input": {
                 "object_id": "obj_1",
                 "bbox": [10, 20, 110, 120],
-                "depth_path": "runs/current_capture/wrist_depth.png",
+                "depth_path": "offline-test-fixture://unavailable-depth.png",
                 "ocr_text": "蒙脱石散",
             },
             "result": {

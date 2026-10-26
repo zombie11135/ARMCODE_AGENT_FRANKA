@@ -69,7 +69,11 @@ class SimpleArmCodeAgentSystem:
                     replan_attempts=replan_attempts,
                 )
 
+            self._execution_replan_attempts = 0
+            self._execution_replan_paths = {}
             ok = self._executing_stage(actions)
+            replan_attempts += self._execution_replan_attempts
+            replan_paths.update(self._execution_replan_paths)
             if ok:
                 return AgentSystemResult(
                     success=True,
@@ -300,7 +304,11 @@ class SimpleArmCodeAgentSystem:
         return left == right or left in right or right in left
 
     def _executing_stage(self, actions: List[SimpleAction]) -> bool:
-        return SimpleExecutionRuntime(self.config).run(actions)
+        runtime = SimpleExecutionRuntime(self.config)
+        ok = runtime.run(actions)
+        self._execution_replan_attempts = runtime.replan_attempts
+        self._execution_replan_paths = runtime.replan_paths
+        return ok
 
     def _home_after_place(self, robot: SimpleRobotActions):
         print("[executing] 放置验证完成，回到 home 观察位。")

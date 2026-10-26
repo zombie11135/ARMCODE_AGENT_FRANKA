@@ -34,6 +34,9 @@ class SimpleAgentSystemConfig:
     max_replan_attempts: int = 1
     resume_from_failure: bool = True
     debug_output: bool = False
+    enable_perception_pipeline: bool = True
+    # Shared only inside this CLI process; a new task keeps the same home.
+    home_pose_session: Any = None
     verbose_events: bool = False
     show_container_observation: bool = True
     # Gate decisions and optional occlusion recovery.
@@ -163,3 +166,8 @@ class SimpleAgentSystemConfig:
     geometry_occlusion_checkpoint: str = ""
     geometry_occlusion_auxiliary: bool = True
     geometry_occlusion_buffer_poses_mmrad: List[List[float]] = field(default_factory=list)
+    # FR3 flange XYZ in mm; bind RPY to the actual pose at task startup.
+    geometry_occlusion_buffer_positions_mm: List[List[float]] = field(default_factory=list)
+    enable_llm_occlusion_recovery: bool = False
+    geometry_occlusion_observation_budget: int = 2
+    geometry_occlusion_recovery_view_poses_mmrad: List[List[float]] = field(default_factory=list)

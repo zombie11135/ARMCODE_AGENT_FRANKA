@@ -131,6 +131,7 @@ def _gate_record(
             "in_gripper": obj.in_gripper,
             "free_space": obj.free_space,
             "placeable": obj.placeable,
+            "fixed_for_task": obj.fixed_for_task,
         }
 
     legacy = gate_result.legacy

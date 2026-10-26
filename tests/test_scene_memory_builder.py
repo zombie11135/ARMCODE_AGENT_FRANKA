@@ -27,7 +27,7 @@ def test_build_scene_memory_from_simple_robot_caches() -> None:
             "grasp_input": {
                 "object_id": "obj_1",
                 "bbox": [10, 20, 110, 120],
-                "depth_path": "runs/current_capture/wrist_depth.png",
+                "depth_path": "offline-test-fixture://unavailable-depth.png",
                 "ocr_text": "蒙脱石散",
             },
             "result": {
@@ -103,7 +103,7 @@ def test_visible_area_occlusion_blocks_high_confidence_grasp_and_updates_memory(
             "grasp_input": {
                 "object_id": "obj_1",
                 "bbox": [20, 20, 60, 60],
-                "depth_path": "runs/current_capture/wrist_depth.png",
+                "depth_path": "offline-test-fixture://unavailable-depth.png",
                 "ocr_text": "布洛芬",
             },
             "result": {
