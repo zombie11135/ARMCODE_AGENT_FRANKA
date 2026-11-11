@@ -55,6 +55,22 @@ def prepare_observation(snapshot_dir, proposals):
         camera_id=camera, capture_group_id=metadata["capture_group_id"],
         timestamp_domain=metadata["timestamp_domain"], reference_frame=reference_frame,
         T_reference_from_camera_optical=transform)
+    # Preserve every fragment next to the group's current visible union.
+    for index, proposal in enumerate(proposals):
+        fragments = proposal.get('visible_fragments', [])
+        if not fragments:
+            continue
+        keys = []
+        for part, fragment in enumerate(fragments):
+            key = f'proposal_{index:03d}_fragment_{part:02d}'
+            arrays[key] = fragment['mask'].copy();keys.append(key)
+        for node in packet['relation_graph']['nodes']:
+            if proposal['source_id'] in node['source_ids']:
+                node.update(object_id=proposal['object_id'], track_id=proposal['object_id'],
+                    visible_fragment_mask_keys=keys,
+                    fragment_source_ids=[f['source_id'] for f in fragments],
+                    grouping='bidirectionally_validated_visible_fragments',
+                    association_source=proposal['association_source'])
     packet["provenance"] = {
         "backend": "real_saved_rgbd_with_predicted_visible_masks",
         "snapshot_dir": str(root.resolve()),
@@ -87,7 +103,12 @@ def save_view(snapshot_dir, proposals, backend_report, output_dir, *, raw_propos
     write_result(packet, arrays, boundary, output_dir / "boundary", color)
     (output_dir / "planar_relations.json").write_text(json.dumps(planar, indent=2, allow_nan=False))
     (output_dir / "segmentation_report.json").write_text(json.dumps({
-        **backend_report, "proposals": [{k:v for k,v in p.items() if k != "mask"} for p in proposals]
+        **backend_report, "proposals": [dict(
+            {k:v for k,v in p.items() if k not in ('mask', 'visible_fragments')},
+            visible_fragments=[dict(source_id=f['source_id'], object_id=f['object_id'],
+                                   mask_key=f'proposal_{i:03d}_fragment_{j:02d}')
+                               for j,f in enumerate(p.get('visible_fragments', []))])
+            for i,p in enumerate(proposals)]
     }, indent=2, allow_nan=False))
     if raw_proposals is not None:
         np.savez_compressed(output_dir / "raw_proposal_masks.npz",

@@ -1,0 +1,24 @@
+2026-11-11 RealSense 权重核对和离线重放
+
+来源：/home/wpy/下载/checkpoint-rs.tar（用户下载）
+安装：/home/wpy/armcode-runtime/graspnet-baseline/logs/log_rs/checkpoint.tar
+SHA-256：60680087c61cba2b6791614fef1519071e294f6dcaf99b3f581bb95f7c51a868
+该文件与原 log_kn/checkpoint.tar、公开 RS 镜像完全一致。此前仅根据目录名把原文件认定为 Kinect 不准确；本次没有改变模型参数。
+
+config/hardware/fr3.yaml 默认后端改为 graspnet_baseline，checkpoint 指向 log_rs；最大解码开口 0.085 m，相机 1280x720。保留现有 ROI、SAM、全场景碰撞、空抓、工具桌面间隙与姿态筛选。
+只重放保存的 RGB-D 场景，未重新采集、未查询机械臂、未发送运动指令、未调用 MoveIt 验证 IK。
+输入：runs/agent_graspnet_baseline/36df7001726c46febd4ae3d9da55b922
+输出：runs/graspnet_realsense/20261111-152352
+结果：235 原始候选 → 233 宽度/分数 → 47 ROI → 45 SAM/桌面高度 → 34 碰撞/空抓 → 3 姿态/工具间隙合格 → 1 最终选中。
+同帧原始候选数组与此前结果逐元素完全一致，因此不能宣称换权重带来效果提升。
+
+hardware/graspnet_baseline_worker.py 的查看入口新增 --stage raw|filtered|selected，默认 selected 不变。
+只调用 GraspGroup.to_open3d_geometry_list 和 Open3D draw_geometries，没有自定义叠加图形。
+raw 显示全部 235 个解码候选（已受 8.5 cm 解码限制），filtered 显示通过点云过滤的 34 个候选，selected 显示姿态/工具筛选后选中的 1 个。
+
+运行：
+cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+/home/wpy/armcode-runtime/agent/bin/python -m hardware.graspnet_baseline_worker --view runs/graspnet_realsense/20261111-152352 --stage raw
+将 raw 改为 filtered 或 selected 可看相应阶段。
+
+验证：真实 GPU 离线推理成功；三个阶段的原生几何全部可加载（未打开 GUI 窗口）；tests/test_graspnet_baseline.py 20 项通过。

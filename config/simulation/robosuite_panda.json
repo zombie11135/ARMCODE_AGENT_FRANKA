@@ -1,0 +1,8 @@
+{
+  "seed": 7,
+  "control_freq": 20,
+  "camera": "agentview",
+  "image_width": 320,
+  "image_height": 240,
+  "spawn_jitter": 0.015
+}

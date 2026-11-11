@@ -16,6 +16,7 @@ from core.actions import (
     place as place,
 )
 from core.skill_base import SkillResult
+from runtime.timing import timed_stage
 from skill_lib.config import (
     FALLBACK_INTRINSICS as FALLBACK_INTRINSICS,
     SimpleRobotConfig as SimpleRobotConfig,
@@ -76,6 +77,7 @@ class SimpleRobotActions:
         self.geometry_buffer_slots_used = 0
         self.geometry_occlusion_events = []
         self.geometry_recovery_state = {'observation_counts': {}, 'history': []}
+        self.information_states = {}
         # Phase-1 unified gate cache (feature reuse: one facade per config key).
         self._unified_gate = None
         self._unified_gate_key: Optional[Tuple[str, str, float, int]] = None
@@ -83,6 +85,8 @@ class SimpleRobotActions:
         self._last_gate_decision_id: Optional[str] = None
 
     def _discard_scene_evidence(self, reason):
+        from runtime.information_state import invalidate_information
+        invalidate_information(self, reason)
         self._pipeline_frame_bindings.clear()
         from skill_lib.actions.task_containers import discard_scene_evidence
         discard_scene_evidence(self, reason)
@@ -194,6 +198,7 @@ class SimpleRobotActions:
 
     # Gate decisions and probes.
 
+    @timed_stage('执行前Gate检查')
     def gate_before_action(
         self,
         action: SimpleAction,
@@ -375,6 +380,7 @@ class SimpleRobotActions:
     def preobserve_containers(self, actions: Iterable[SimpleAction]) -> SkillResult:
         return observation.preobserve_containers(self, actions=actions)
 
+    @timed_stage('单个容器定位', detail=lambda self, container: container)
     def observe_container(self, container: str) -> SkillResult:
         return observation.observe_container(self, container=container)
 
@@ -418,6 +424,7 @@ class SimpleRobotActions:
 
     # Motion through the hardware adapter.
 
+    @timed_stage('返回home')
     def home(self) -> SkillResult:
         return motion.home(self)
 

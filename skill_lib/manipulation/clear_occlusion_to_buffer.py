@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from core.skill_base import BaseSkill, SkillResult
 from runtime.observation_memory import scene_mutation
+from runtime.timing import timed_stage
 
 
 FALLBACK_INTRINSICS = {
@@ -23,6 +24,7 @@ class ClearOcclusionToBufferSkill(BaseSkill):
     name = "clear_occlusion_to_buffer"
     description = "检测目标上方遮挡物，使用 AnyGrasp 抓取并搬运到固定 buffer 位姿。"
 
+    @timed_stage('清障流程')
     def run(
         self,
         target_name: str,

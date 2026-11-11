@@ -319,7 +319,11 @@ class Robotiq2F85:
             if self._session_error is not None:
                 raise GripperError(self._session_error + "; inspect then reconnect explicitly; no action retried")
             if require_ready and not self._last_status.ready:
-                raise GripperError(f"Gripper not ready (fault=0x{self._last_status.fault:02x}); activate explicitly first")
+                state = self._last_status
+                raise GripperError(
+                    f"Gripper not ready (fault=0x{state.fault:02x}, "
+                    f"activated={state.activated}, activation_state={state.activation_state}, "
+                    f"go_to={state.go_to}); inspect status and activate explicitly if required")
             if require_ready and self._last_status.go_to and self._last_status.object_state == 0:
                 raise GripperError("Gripper is still moving; wait for completion or issue stop()")
             return self._last_status

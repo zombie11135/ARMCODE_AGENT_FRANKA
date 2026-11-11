@@ -1,0 +1,74 @@
+原版 GraspNet-baseline 后端切换（2026-11-05）
+============================================
+
+活动配置：config/hardware/fr3.yaml，grasp_backend: graspnet_baseline。
+源码：/home/wpy/armcode-runtime/graspnet-baseline。
+Python：/home/wpy/armcode-runtime/agent/bin/python。
+权重（当时路径）：logs/log_kn/checkpoint.tar，epoch 18。2026-11-11 核对：与用户下载的 checkpoint-rs.tar 字节完全一致，不能据 log_kn 目录名判定为 Kinect 权重。
+当时官方 RealSense 下载返回 Quota exceeded；此前对本机权重训练相机的认定证据不足，现已更正。
+官方来源：https://github.com/graspnet/graspnet-baseline
+源码和权重记录：/home/wpy/armcode-runtime/graspnet-baseline/deployment_provenance.json。
+
+运行：退出旧 Agent（/quit），使用之前相同启动命令重启即可。
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash run_fr3_agent.sh --simple_actions --local_vlm qwen3vl-8b-awq --use_llm_planner --use-sam-for-grasp --enable_geometry_occlusion --disable_geometry_occlusion_auxiliary --arm-speed 0.05 --execute_robot
+此命令启用真实运动；去掉 --execute_robot 可做无动作检查。
+启动不发送任务；在 armcode> 输入任务才进入执行流程。
+运行提示应显示“正在调用 GraspNet-baseline”。
+后台首帧分析和候选预计算继续使用原简易流水线。
+既有 API 字段 context.anygrasp、技能文件名保留兼容，实际模型为原版 PointNet2。
+GSNet 源码保留在磁盘，但当前 Agent 不调用 GSNet 网络。
+
+实现与约束：
+- 模型/采样：原版 GraspNet-baseline，300 views，12 angles，4 depths，20000 点。
+- 共享标定、同帧验证、目标掩码、85 mm 开口上限、全场景碰撞/空抓筛选。
+- 碰撞参数未放宽：voxel 5 mm、approach 80 mm、collision/empty threshold 0.01。
+- 原始 Nx17 输出保存为 graspnet_baseline/grasps_raw.npy，报告分列碰撞与空抓数量。
+- 预览只使用原生 GraspGroup/Open3D 点云与抓取几何，不添加工具包络、坐标轴等叠加。
+- 机械臂执行仍由原 MoveIt 规划与控制流程验证。
+
+相同西瓜霜旧场景验证：
+原始 167 -> 开口/分数 66 -> ROI 8 -> 目标掩码 5 -> 点云碰撞/空抓后 1。
+剩余候选预测开口 57.45 mm，标定及配置中的姿态筛选通过。
+但真实 MoveIt 只规划检查失败：No collision-free IK candidate found for the table/tool scene and requested limits。
+因此仅证明后端运行和候选接口接通，不能将这个候选解释为可执行抓取。
+沿用原配置的 grasp_table_clearance_check=false；本轮未放宽任何碰撞或限位检查。
+未执行新的机械臂或夹爪动作。
+
+回归：核心 614 passed、2 skipped；模型名称提示修正后相关测试 46 passed。
+证据：runs/restoration/20261105/baseline_switch.json、baseline_result.json、baseline_robot_plan.json。
+修改前备份：runs/restoration/20261105/before-baseline/。
+
+解码宽度上限更新（同日，覆盖前述“只剩 1 个且规划失败”的旧结果）
+- 配置新增 perception.graspnet_max_gripper_width_m: 0.085，单位米。
+- AnyGrasp SDK 已有 max_gripper_width；原版 baseline 无同名外部参数，
+  此适配器将上限传入原版 pred_decode 使用的 GRASP_MAX_WIDTH。
+- 上游先对预测开口乘 1.2，再 clamp；现在该 clamp 的上限由 100 mm 改为 85 mm。
+- 仅当前独立推理进程的解码常量临时改变，解码后恢复；未改第三方源码和训练权重。
+- 这是解码开口限制，不是宽度条件网络，不重新预测中心、方向或分数。
+- 输出的较窄抓取全部重新经过原有完整点云碰撞/空抓检查，不能直接信任裁剪结果。
+- 开口参数须为有限正数且不超过 0.085 m；更小的上限也会参与候选缓存键。
+- 同场景验证：167 原始 -> 167 宽度/分数 -> 26 ROI -> 21 目标掩码 -> 7 碰撞/空抓通过。
+- 逐项比较确认只有 101 个候选的开口改变，全部位置、方向、分数保持不变。
+- 当前选中的候选完成标定/姿态筛选，并通过真实 MoveIt 只规划检查；未执行抓取。
+- 相关回归 83 passed。证据：runs/restoration/20261105/baseline_width_validation.json、
+  baseline_width_result.json、baseline_width_robot_plan.json。
+- 退出旧 Agent 并用原启动命令重启后生效。
+
+桌面/工具预检查修复（13:52 抓取规划失败后）
+- 错误 d2df2887846547378e0f241630f7d46d 发生于下降抓取前的规划；
+  预抓取已执行，抓取目标的轨迹未激活，尚未进入闭合步骤。
+- 该批候选的第 5 号工具包络低于配置桌面 2.33 mm；旧配置关闭了候选桌面筛选，
+  但 MoveIt 仍检查桌面/工具碰撞，因此直到执行阶段才拒绝该终点。
+- 现已启用 ros_ws/config/workcell.json 的 grasp_table_clearance_check。
+  桌面高度、工具尺寸、padding、关节和碰撞约束均未放宽或改动。
+- execute_grasp 在开夹爪/移动前同时预检预抓取和抓取终点；每段实际运动仍独立重新规划。
+  这不是对整段抓取运动的提前执行或轨迹复用，也不自动重试运动失败。
+- 同批 13 个点云候选中，2 个通过工具桌面筛选，新选第 0 号；工具最低处高于桌面约 10.04 mm。
+- 新候选两个终点的真实 MoveIt 只规划检查均通过，未执行新的机器人动作。
+- 相关回归 89 passed；核心回归 629 passed、2 skipped。
+- 重启 Agent 后生效。当前 home_pose=null，重新启动会用首次实际位姿作为会话 home；
+  失败后停在预抓取位时，应先恢复合适的观察位再开始新任务。
+- 原任务拍摄法兰位姿（m/rad）：0.359637 -0.065429 0.584053 -3.005520 -0.048702 -1.471739。
+- 记录：runs/restoration/20261105/grasp_precheck_fix.json。
+- 修改前备份：runs/restoration/20261105/before-grasp-precheck/。

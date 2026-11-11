@@ -5,6 +5,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.timing import timed_stage
 from skill_lib.manipulation.plan_grasp_with_anygrasp import PlanGraspWithAnyGraspSkill
 
 
@@ -229,6 +230,7 @@ class PlaceToContainerSkill(BaseSkill):
                 pass
             return SkillResult(success=False, data={}, error=error)
 
+    @timed_stage('容器RGB-D拍摄')
     def _capture(self, camera_name: str) -> Dict[str, Any]:
         camera = self.context.require("camera")
         if camera_name == "wrist":
@@ -237,6 +239,7 @@ class PlaceToContainerSkill(BaseSkill):
             return camera.capture_global()
         raise ValueError(f"Unknown camera_name: {camera_name}")
 
+    @timed_stage('容器检测与坐标计算')
     def _estimate_place_plan_once(
         self,
         camera_name: str,
@@ -351,6 +354,7 @@ class PlaceToContainerSkill(BaseSkill):
             float(target_rpy[2]),
         ]
 
+        stack_support = None
         place_flange_z_m = None
         if self.context.transforms is not None:
             from hardware.agent_geometry import mmrad
@@ -359,6 +363,16 @@ class PlaceToContainerSkill(BaseSkill):
             tcp = Pose6D(*[v / 1000 for v in place_pose[:3]], *place_pose[3:])
             place_pose = mmrad(self.context.transforms.tcp_to_flange_pose(pose_matrix(tcp)).values)
             arm_config = getattr(self.context.arm, 'config', None)
+            if getattr(arm_config, 'place_height_mode', 'fixed') == 'stack_rgbd':
+                from hardware.agent_geometry import capture_pose
+                from hardware.stack_surface import estimate_support
+                observed_pose = capture_pose(capture, self.context.transforms)
+                stack_support = estimate_support(depth, intrinsics,
+                    self.context.transforms.base_T_camera('wrist', observed_pose), bbox,
+                    center_base_xyz[:2], footprint_m=arm_config.place_support_footprint_m,
+                    max_relief_m=arm_config.place_support_max_relief_m)
+                stack_support['capture_geometry'] = capture['capture_geometry']
+                stack_support['depth_path'] = depth_path
             place_flange_z_m = getattr(arm_config, 'place_flange_z_m', None)
             if place_flange_z_m is not None:
                 # Apply AFTER TCP conversion: this is flange Z, not TCP Z or tray clearance.
@@ -386,6 +400,7 @@ class PlaceToContainerSkill(BaseSkill):
             "place_pose_mmrad": place_pose,
             "lift_pose_mmrad": lift_pose,
             "place_clearance_mm": place_clearance_mm,
+            "stack_support": stack_support,
             "place_height_mode": "absolute_flange_z" if place_flange_z_m is not None else "container_relative",
             "place_flange_z_mm": None if place_flange_z_m is None else float(place_flange_z_m) * 1000.0,
             "approach_clearance_mm": approach_clearance_mm,

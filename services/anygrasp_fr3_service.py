@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 
 from hardware.config import PROJECT_ROOT
+from runtime.timing import timed_stage
 from .gsnet_service import GSNetService
 
 
@@ -14,7 +15,7 @@ def validate_anygrasp_paths(perception):
             raise ValueError(f'perception.{name} must be an absolute path for FR3 AnyGrasp')
     sdk = Path(perception.anygrasp_dir)
     for path in (Path(perception.anygrasp_python), Path(perception.anygrasp_ckpt), sdk / 'gsnet.so',
-                 sdk / 'lib_cxx.so', sdk / 'license/licenseCfg.json'):
+                 sdk / 'license/licenseCfg.json'):
         if not path.is_file():
             raise FileNotFoundError(f'AnyGrasp dependency missing: {path}')
     if not os.access(perception.anygrasp_python, os.X_OK):
@@ -47,6 +48,7 @@ class AnyGraspFR3Service(GSNetService):
                        cwd=PROJECT_ROOT, env=environment, check=True, timeout=180,
                        stdout=log, stderr=subprocess.STDOUT)
 
+    @timed_stage('抓取位姿预览窗口等待')
     def visualize_last_grasps_by_indices(self, indices, window_name=None):
         if list(indices) != [0] or self.last_run is None:
             raise ValueError('AnyGrasp exposes one selected grasp, index 0')

@@ -206,8 +206,11 @@ def test_mobileclip2_identity_drives_geometry_agent_without_ocr(rig, monkeypatch
 
 
 @pytest.mark.parametrize('legacy_gate', [False, True])
-def test_agent_observe_clear_reobserve_grasp_and_reuse_fixed_container(rig, legacy_gate):
+@pytest.mark.parametrize('use_sam_for_grasp', [False, True])
+def test_agent_observe_clear_reobserve_grasp_and_reuse_fixed_container(
+        rig, legacy_gate, use_sam_for_grasp):
     rig.robot.config.enable_nesyro_gate = legacy_gate
+    rig.robot.config.use_sam_for_grasp = use_sam_for_grasp
     result = rig.robot.run([observe('target'), grasp('target'), place('blue tray')])
     assert result.success, (result.error, result.data)
     names = [e[0] for e in rig.events]

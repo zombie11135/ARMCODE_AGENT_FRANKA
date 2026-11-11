@@ -1,5 +1,6 @@
 """Deterministic concurrency tests with fake backends; no hardware or models."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 import threading
 from pathlib import Path
 from unittest.mock import Mock
@@ -7,6 +8,30 @@ from unittest.mock import Mock
 import pytest
 
 from runtime.perception_pipeline import ordered_bounded_map, serialized_resource
+from runtime.timing import task_timing, timing_stage
+
+
+def test_bounded_workers_keep_timing_parent_and_resource_wait_spans(tmp_path):
+    rendezvous = threading.Barrier(2)
+    @serialized_resource('gpu')
+    def guarded(i):
+        with timing_stage('candidate'):
+            return i
+    def work(i):
+        # Both jobs must have distinct copies; entering one Context twice fails.
+        rendezvous.wait(timeout=2)
+        return guarded(i)
+    report = tmp_path/'timing.json'
+    with task_timing('candidate timing', report):
+        with timing_stage('owner'):
+            assert list(ordered_bounded_map(work, range(4), workers=2)) == list(range(4))
+    rows = json.loads(report.read_text())['spans']
+    parent = next(r for r in rows if r['name'] == 'owner')
+    for name in ('candidate', '资源锁等待'):
+        children = [r for r in rows if r['name'] == name]
+        assert len(children) == 4
+        assert all(r['background'] and r['parent_id'] == parent['id'] for r in children)
+    assert {r['attributes'].get('error_type') for r in rows} == {None}
 
 
 def test_gpu_is_exclusive_but_cpu_ocr_can_overlap():

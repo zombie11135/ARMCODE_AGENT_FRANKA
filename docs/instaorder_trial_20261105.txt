@@ -1,0 +1,76 @@
+InstaOrder 预训练遮挡关系实验（2026-11-05）
+
+目的与实现
+直接使用官方 InstaOrderNet_o 权重，不训练，不重新分割，不合并掩膜。
+保留 SAM3 的可见实例及节点编号，模型接收 RGB 和两张可见掩膜，判断两个方向的遮挡。
+先沿用现有 boundary/relations.json 的边界邻接、第三物体阻隔和 5% 掩膜冲突规则筛选物体对。
+预测阈值使用官方 0.5；分数是未经本场景校准的模型输出，不等于正确率。
+保留原有几何候选，补充模型候选；与已确定局部深度顺序或原有边方向冲突时记录冲突。
+模型同时给出双向遮挡时保留原始分数待复核，不强行选择单向。
+所有输出都是当前视角下 possible_occludes，不能当作物理支撑关系或搬运许可。
+
+代码
+occlusion_reasoning/pretrained_order.py：官方模型加载、原始裁剪/归一化、双向平均、几何约束补边。
+occlusion_reasoning/replay_pretrained_order.py：读取历史视图、批量推理、全量审计模式、保存图和报告。
+tests/test_pretrained_order.py：方向映射、掩膜不变、深度冲突、远邻、第三物体阻隔等反例测试。
+没有修改在线 agent 默认配置；本轮完成的是离线可复用后端与实验，不包含实时服务接线。
+
+数据集与模型来源
+InstaOrder：COCO 场景中的实例遮挡/深度顺序标注，官方提供数据和预训练模型。
+https://github.com/SNU-VGILab/InstaOrder
+本次使用原版模型代码：https://github.com/POSTECH-CVLab/InstaOrder
+源码提交：dd88eceea300f60722b763f66335ca0099007aea
+权重：InstaOrderNet_o；Google Drive ID 1pTDnyYG3VoARCuwWul3evjXMUNVSiz-1
+SHA256：3b235a08ac51571abbfcd0474d75be145e148903c323a91788e1ff2f21e736f9
+本机模型目录：/home/wpy/armcode-runtime/models/instaorder
+无需下载训练集即可使用当前权重。
+另一个可选方向是 RGB-D 可见/完整物体分割 UOAIS，其提供 UOAIS-Sim 数据与预训练模型；本次没有安装或评测：
+https://github.com/gist-ailab/uoais
+
+实验输入
+最新场景 runs/occlusion_real/20261105_210200_30848d 的 wrist/global 两个视图，及
+runs/experiments/relations_only_20261105/replay/frame_00..04 五个旧视图。
+这些是七个保存视图，不是七个独立、人工标注的测试场景。
+
+候选边数量（原有 -> 补充后）
+最新腕部：2 -> 8；全局：2 -> 12。
+旧帧 00：3 -> 4；01：3 -> 5；02：2 -> 4；03：0 -> 0；04：0 -> 0。
+没有完整人工真值，不能将边数量增加解释为准确率提高。
+
+最新腕部值得核对的关系（箭头指向被遮挡对象）
+保留：N10 -> N5（盖板/左上药盒）、N7 -> N6（蓝块/斜放药盒）。
+补出：N10 -> N1（盖板/下方竖放药盒），分数 0.72055，视觉上符合遮挡。
+补出：N10 -> N6（盖板/斜放药盒），分数 0.91909，局部深度也支持盖板在前。
+其他新增：N10 -> N13、N6 -> N8、N7 -> N8、N5 -> N13。
+其中 N5 -> N13（0.66891）仍有歧义；N8/N13 的实例归属和掩膜竞争也没有因加入模型而解决。
+全局视图包含机器人夹爪等碎片候选，不能把全部新增关系解释成药盒间关系；不同视角的 N 编号互不对应。
+
+全量模型最初在腕部给出 16 条有向候选，约束筛选后为 8 条：
+排除 5 条无邻接证据、2 条被第三实例隔开的关系、1 条掩膜冲突关系。
+默认快速模式在推理前筛选，只推理 8 对；全量审计推理 91 对后筛选，两者最终图一致。
+七个视图的快速模式与全量审计图全部一致。
+两个分散摆放旧帧均无新增边，但它们缺少紧密接触而不遮挡的困难负例，不能据此声称复杂场景无误报。
+
+耗时与验证
+最新腕部候选裁剪+模型推理约 0.050 秒，8 对，RTX 4090 D，cuda:0；模型已加载并预热。
+这个计时不含磁盘读取、SAM3、原有几何提取、可视化，也不是整个 agent 的延迟。
+此轮模型构建/权重读取约 0.412 秒，首次预热约 0.198 秒；不含 Python 导入和依赖启动。
+官方源函数逐项对照 8 个有效物体对、16 次有序输入，输入张量最大误差 0，遮挡方向全部一致。
+39 项相关测试通过：tests/test_pretrained_order.py tests/test_occlusion_relations.py tests/test_occlusion_primary_aux.py。
+本轮只读取保存数据，没有访问相机、机械臂或夹爪。
+
+结果目录
+runs/experiments/instaorder_20261105/audit：包含所有物体对原始分数、被排除原因。
+runs/experiments/instaorder_20261105/neighbors：默认快速模式。
+00_wrist/relations_overlay.png：最新腕部增强后的图。
+00_wrist/baseline/relations_overlay.png：同一绘图器生成的原始图。
+01_global/relations_overlay.png：最新全局视图。
+所有图均复用 occlusion_reasoning.extract_relations.write_result，没有添加新的绘图实现。
+report.json：汇总；各视图 relations.json：原始分数、几何证据和新增关系。
+
+复跑命令（输出目录需使用新名字）
+cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+.venv-mobileclip2-fr3/bin/python -m occlusion_reasoning.replay_pretrained_order \
+  --view-dir runs/occlusion_real/20261105_210200_30848d/primary_aux/wrist \
+  --output-dir runs/experiments/instaorder_manual_review
+附加 --audit-all-pairs 可保存所有物体对的模型结果，用于检查筛选原因。

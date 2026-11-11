@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 from runtime.perception_pipeline import serialized_resource
+from runtime.timing import timed_stage
 
 
 def sha(path):
@@ -79,10 +80,17 @@ def associate_target(nodes, selected):
 
 
 class WristOcclusionService:
-    def __init__(self, checkpoint, device='cuda', output_dir='runs/agent_occlusion', backend=None):
+    def __init__(self, checkpoint, device='cuda', output_dir='runs/agent_occlusion', backend=None, enable_fragment_association=False, fragment_vlm_config=None):
         self.checkpoint, self.device = str(checkpoint), device
         self.output_dir = Path(output_dir)
         self.backend = backend
+        self.enable_fragment_association = enable_fragment_association
+        self.fragment_memories = {}
+        self.fragment_advisor = None
+        if fragment_vlm_config:
+            from services.openai_chatgpt_vlm_client import OpenAIChatGPTVLMClient
+            from services.vlm_fragment_advisor import VLMFragmentAdvisor
+            self.fragment_advisor = VLMFragmentAdvisor(OpenAIChatGPTVLMClient(**fragment_vlm_config))
 
     def freeze(self, capture, camera='wrist'):
         """Make a same-frame, immutable adapter snapshot before identity inference."""
@@ -111,6 +119,7 @@ class WristOcclusionService:
             frozen['points_path'] = str(points.resolve())
         return frozen, root
 
+    @timed_stage('SAM3分割与遮挡关系构建')
     def analyze(self, capture, root, selected=None):
         from perception_v2.proposal_refinement import (
             DEFAULT_OCCLUSION_PROMPTS, refine_proposals, select_visible_hypotheses)
@@ -120,7 +129,23 @@ class WristOcclusionService:
         camera, root = capture['camera_name'], Path(root)
         color = cv2.imread(capture['color_path'])
         candidates, backend, raw = refine_proposals(color, DEFAULT_OCCLUSION_PROMPTS, self.backend)
-        chosen, selection = select_visible_hypotheses(candidates)
+        metadata = json.loads((root/camera/'grasp_input.json').read_text())
+        from perception_v2.fragment_association import FragmentAssociationMemory
+        provenance = capture.get('observation_cache') or {}
+        validator = getattr(self.backend, 'validate_fragments', None) if self.enable_fragment_association else None
+        memory = self.fragment_memories.setdefault(camera, FragmentAssociationMemory())
+        association_context = dict(scope=provenance.get('scope'), scene_epoch=provenance.get('scene_epoch'),
+            frame_id=metadata['capture_group_id'],
+            timestamp=capture['timestamp'], pose=(capture.get('capture_geometry') or {}).get('before'))
+        advisor = None
+        if self.fragment_advisor is not None and camera == 'wrist' and validator is not None:
+            advisor = lambda masks: self.fragment_advisor.assess(
+                capture['color_path'], masks, association_context, root/'fragment_vlm')
+        chosen, selection = select_visible_hypotheses(candidates,
+            depth_m=np.load(root/camera/'depth_m.npy', allow_pickle=False),
+            intrinsics=metadata['depth_intrinsics'], fragment_validator=validator, image=color,
+            association_memory=memory, association_context=association_context, fragment_advisor=advisor,
+            enable_joint_reconciliation=self.enable_fragment_association)
         backend['visible_hypothesis_selection'] = selection
         directory = root/'evidence'
         save_view(root/camera, chosen, backend, directory, raw_proposals=raw)
@@ -133,6 +158,16 @@ class WristOcclusionService:
                 np.save(path, arrays[node['raw_mask_key']].astype(bool))
                 node['visible_mask_path'] = str(path.resolve())
                 node['visible_mask_sha256'] = sha(path)
+        geometry = capture.get('capture_geometry') or {}
+        wrist_calibration = geometry.get('calibration', {}).get('cameras', {}).get('wrist')
+        if camera == 'wrist' and wrist_calibration is not None:
+            from hardware.interfaces import Pose6D
+            from hardware.transforms import pose_matrix
+            from occlusion_reasoning.structure import vertical_relations
+            transform = (pose_matrix(Pose6D(*geometry['before'])) @
+                         np.asarray(wrist_calibration['T_flange_camera']))
+            with np.load(directory/'observation/observation_arrays.npz', allow_pickle=False) as arrays:
+                view['spatial_relations'] = vertical_relations(view['relation_graph']['nodes'], arrays, transform)
         association = associate_target(view['relation_graph']['nodes'], selected) if camera == 'wrist' else None
         result = dict(schema='agent_wrist_occlusion_v1', camera_id=camera,
                       primary=view, target_association=association,
@@ -149,7 +184,9 @@ class WristOcclusionService:
     def _ensure_backend(self):
         if self.backend is None:
             from perception_v2.sam3_proposals import SAM3Proposals
-            self.backend = SAM3Proposals(self.checkpoint, device=self.device)
+            from services.sam3_model_pool import image_model
+            model = image_model(self.checkpoint, device=self.device, interactive=True)
+            self.backend = SAM3Proposals(self.checkpoint, device=self.device, model=model)
 
 
 def blocking_quality_issues(node):
@@ -190,6 +227,12 @@ def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_dep
     exploratory = target is None
     if exploratory and not allow_search:
         return dict(status=report['target_association']['status'], blocker=None)
+    local_conflicts = [region for region in view.get('local_depth_regions', [])
+                       if region.get('possible_local_occlusion')
+                       and target in (region['source'], region['target'])]
+    if local_conflicts:
+        return dict(status='local_depth_order_conflict', blocker=None, target_node_id=target,
+                    local_regions=local_conflicts)
     if target is not None and not predecessors[target]:
         quality = blocking_quality_issues(nodes[target])
         status = 'target_quality_insufficient' if quality else 'no_occlusion_evidence'
@@ -231,7 +274,10 @@ def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_dep
         eligible.append(node)
     if not eligible:
         return dict(status='blocker_quality_insufficient', blocker=None)
-    eligible.sort(key=lambda n: (-n['detection_score'], n['node_id']))
+    from occlusion_reasoning.structure import root_priority, summarize_structure
+    structure = summarize_structure(list(nodes), pairs)
+    eligible.sort(key=lambda n: (*(-value for value in root_priority(n['node_id'], target, pairs)),
+                                 -n['detection_score'], n['node_id']))
     if preferred_node_id is not None:
         if preferred_node_id not in {n['node_id'] for n in eligible}:
             raise ValueError('Preferred blocker is not an eligible exposed ancestor/search candidate')
@@ -240,4 +286,6 @@ def choose_blocker(report, *, allow_search=False, max_image_fraction=.5, min_dep
     return dict(status='exploratory_clear_candidate' if exploratory else 'target_occluded',
                 blocker=blocker, target_node_id=target, exploratory=exploratory,
                 basis='single_view_possible_occlusion_not_grasp_blocking_proof', confirmed=False,
-                eligible_node_ids=[n['node_id'] for n in eligible])
+                eligible_node_ids=[n['node_id'] for n in eligible],
+                dependency=structure['targets'].get(target),
+                root_priorities={n['node_id']: list(root_priority(n['node_id'], target, pairs)) for n in eligible})

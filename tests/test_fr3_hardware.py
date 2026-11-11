@@ -338,7 +338,10 @@ class AgentWiringTests(OfflineTestCase):
         from agents.simple_execution_runtime import SimpleExecutionRuntime
         from core.actions import grasp, place
         from hardware.config import DEFAULT_CONFIG
-        cfg = SimpleAgentSystemConfig(goal="test", hardware_config_path=str(DEFAULT_CONFIG), execute_robot=True)
+        timing_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(timing_dir.cleanup)
+        cfg = SimpleAgentSystemConfig(goal="test", hardware_config_path=str(DEFAULT_CONFIG), execute_robot=True,
+                                      plan_json=str(Path(timing_dir.name)/'plan.json'))
         runtime = SimpleExecutionRuntime(cfg)
         with patch("hardware.runtime.load_transforms", return_value=PendingTransforms()), patch.object(runtime, "_build_execution_context") as make_context:
             with self.assertRaises(RuntimeError):

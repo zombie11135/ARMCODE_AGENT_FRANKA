@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, Optional
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.timing import timed_stage
 from services.openai_chatgpt_vlm_client import OpenAIChatGPTVLMClient
 
 
@@ -97,6 +98,7 @@ class VerifyMedicinePlacedVDMSkill(BaseSkill):
     name = "verify_medicine_placed_vdm"
     description = "基于放置前后 global + wrist 四图，验证目标药盒是否进入容器。"
 
+    @timed_stage('放置结果实际验证')
     def run(
         self,
         medicine_query: str,

@@ -1,0 +1,255 @@
+PMIR 执行耗时拆分与计算延迟控制实验
+实验日期：2026-11-10；活动 SSD 仓库，沿用既有 PMIR / robosuite 实现。
+
+本轮范围
+没有增加新的规划、预测、缓存或技能模块；没有优化调度算法，也没有改变物理技能轨迹。
+仅补充既有 scheduler/adapter 的分层计时、Naive 对照和实验入口的延迟扫描。
+不部署、不调用真实模型、不操作 FR3、不使用历史硬件坐标、不启用碎片合并。
+既有修改保留；改动前副本和全文件哈希在本次实验根目录 before/ 与 initial_files.json。
+
+证据位置
+runs/experiments/pmir_cost_sweep_20261110/
+  historical_decomposition.json：旧 native_final / latency_200ms 日志回溯，无法辨认的分项保持 null。
+  sweep/manifest.json：参数、软件版本、线程限制及精确源码哈希。
+  sweep/source_snapshot/：本次实际执行代码副本；不能用以后工作树代码代替它解释这些结果。
+  sweep/order.json：包括预热在内的真实执行顺序。
+  sweep/results.json / comparison.json：逐轮结果、配对和分组统计。
+  sweep/measured_*/seed_7/<scenario>/delay_*ms/<mode>/：每轮全部证据。
+    events.jsonl / physics_events.jsonl：调度/物理事件。
+    task_timing.json / result.json：入口计时、微操作区间、成功/动作/初态证据。
+    cost_profile.json：互斥前台区间、计算阻塞的下一物理节点及依赖原因。
+    before/after/visibility 图像、RGB-D：用于核对初态和遮挡事件。
+  figures/：完整扫描、耗时堆积图、无效计算和三模式时间线。
+
+旧日志能和不能回答什么
+旧 PERCEIVE 和 CAPTURE 节点区间可以回溯；但 CAPTURE 节点只包含技能准备采图，不能
+覆盖 initial/lift/release/settle 的可见性监测采图。旧 MOVE 区间是协作式微操作驻留时间，
+包含穿插进来的调度、采图、计算结果提交等，不能称为纯机械运动。旧版本还没有单独记录
+格式转换/不可变快照复制、验证、调度或等待原因；不能把残差全部称为调度开销。
+历史原始数据保持不变，没有用本轮新测值伪造旧数据缺失分项。
+
+本轮互斥记账
+主线程自 Scheduler.started 到计算后台收尾结束连续分段，嵌套调用切换类别，所有分段
+首尾相接且严格加和为 wall_duration_s。工作线程是另一条轴，可能与前台重叠，不可相加。
+
+感知计算：PERCEIVE 的墙钟，另列实际注入 sleep 区间、扣除 sleep 的处理墙钟、线程 CPU。
+后者仍可能包含线程被抢占；不是神经网络推理时延。验证用颜色掩膜归在状态验证，不重复算。
+图像：image_acquire_format 是渲染、RGB-D 转换和后端内部复制；image_snapshot_copy 是
+额外不可变快照复制。未宣称区分了后端每次内存复制；二者相加是本轮所有任务内采图开销。
+调度：scheduler_decision 是就绪/依赖/资源/控制分支扫描、分派和事件边维护。
+状态验证：可见性掩膜、稳定性、物体版本、接触与放置检查，剔除嵌套采图和日志。
+物理执行：physics_step 为实际 env.step 的控制器及 MuJoCo 积分；robot_control 为推进
+微操作/插值等外围工作。包括抓放、夹爪和稳定保持，不能当真实 FR3 纯运动时长。
+等待计算：compute_wait_poll 为无活跃物理操作时的等待，包含完成后的轮询尾部。
+其他：日志、名义航点生成、运行时维护、收尾；profiling_analysis 单列分析阻塞原因的成本。
+计时边界本身也有成本，其他仪表开销随调用进入各类别/维护项，没有声称测量是零开销。
+
+关键路径上的计算：使用更窄且可核查的定义
+exposed_critical_compute_s 是以下三个条件的交集：
+  (a) 没有正在推进的物理微操作；(b) worker 确实还在执行；
+  (c) 该任务处于下一物理操作尚未完成的数据依赖链，或占用该链所需资源。
+等待完成后的轮询尾部不算。记录 node/attempt/blocked_physical 和 data_dependency 或
+resource_conflict，因此可以核对“到底在等什么”。这是暴露在关键等待链上的计算时间
+下界；不是整张图反事实最长路径，也不包含资源竞争拖慢物理仿真等间接影响。未测得的
+完整反事实关键路径不虚构成一个精确数字。
+
+三个不同的重叠/收益概念
+compute_physical_residency_overlap_wall_s：计算与物理微操作整个驻留区间的交集。
+compute_actual_physics_overlap_s：计算与互斥 env.step 区间的交集，排除穿插采图等。
+saved_wall_s：同条件配对 T_serial - T_candidate，允许负数，才是实测净时间收益。
+前两项即使很大，也不能直接推出第三项。可以借助互斥成本的“串行减候选”差分解释净收益：
+各类别差分之和严格等于总墙钟差分。物理仿真执行速度的波动也计入，不把它全归因于算法。
+
+计时窗口
+wall_duration_s 包含任务内采图、监测、验证、日志、等待和后台收尾。
+task_timing_wall_s 另外包含调度器构造、最终目标检查和计时包装，用于复核入口总时间；
+配对也保存 saved_task_timing_s。编译、环境初始化、运行前后图像导出在窗口外；不是冷启动
+端到端系统时间。fast 模式等纯计算时暂停物理步进。报告的墙钟是本机仿真完成时间，
+sim_duration_s 是模拟控制时间；两者都不是实机 FR3 数据。
+
+控制变量
+两次抓放程序、seed 7、初态、控制器、动作顺序、资源额度、成功标准不变。
+每次 PERCEIVE 额外注入 0/50/100/200/500 ms，真实 RGB-D 几何运算保留。Serial、Dynamic
+需要两次有效感知；Naive 若发生一次无效早算则有三次感知，每次都承担该注入时延。
+该 sleep 控制的是计算返回延迟，不模拟 CPU/GPU 饱和、GIL 争用或显存/内存压力。
+
+Serial：按序执行微操作。
+Naive：同一静态图/资源/版本检查，但首次隐式采图不等待可见性；空观测作废，实际确认可见
+且稳定后最多重采一次。显式 observe 条件分支不改；无可见证据不执行抓取。
+Dynamic：首次隐式采图就等待已确认的可见/稳定事件。
+Naive 是本实验的明确对照策略，不声称代表所有已有流水线实现。三者都有相同状态监测，
+没有通过删除基线检查或放宽成功标准制造速度收益。
+
+场景：独立可见、初始 A 完全遮挡 B。不是连续遮挡比例扫描，也没有其他遮挡拓扑。
+每个场景/延迟/方法 6 次正式重复，同块三方法相邻运行；6 轮使用全部 6 种方法排列，
+每种方法在每个位置出现两次，场景/延迟块顺序随机。每种场景/方法先在 500 ms 预热一次。
+所有测试在正式扫描前完成，计时期间没有并行运行本会话的测试或绘图。
+仅比较初始 RGB/qpos、动作顺序、fast 步数相同且双方成功的配对。失败保留并计入成功率。
+Bootstrap 的 95% 区间来自 6 个配对差值重复抽样，仅作探索性描述，不是强显著性或普适阈值。
+
+复现命令（输出目录必须不存在）
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv-robosuite/bin/python -m simulation.pmir.experiment \
+  --output-dir runs/experiments/pmir_cost_sweep_repeat \
+  --seeds 7 --repeats 6 --warmups 1 --modes serial naive dynamic --delays-ms 0 50 100 200 500
+.venv-mobileclip2-fr3/bin/python scripts/plot_pmir.py \
+  --run-dir runs/experiments/pmir_cost_sweep_repeat --output-dir runs/experiments/pmir_cost_sweep_repeat_figures \
+  --sweep --delay-ms 200 --scenario occluded --repeat 0
+
+验证
+.venv-robosuite 下 tests/test_pmir.py + tests/test_pmir_robosuite.py：28 passed。
+包含两场景三模式真实接触抓放、同初态/动作/步数、无效重采、不可见不执行、失效停止、
+前台互斥分区、关键等待裁剪，以及后台输入不能修改冻结图像。
+.venv-mobileclip2-fr3 下感知流水线/Hybrid/计时/CaP/PMIR 相关回归：98 passed。
+两组存在重叠，不相加为独立测试数量；均不能替代真机验证。
+
+正式测量结果
+180/180 成功；6 次预热排除。120/120 Serial 对照配对可比；180 份细粒度日志核查通过。
+每种场景内，所有模式/延迟/重复的初始 RGB 和 qpos 哈希均只有一个值。
+无遮挡固定 773 控制步/38.65 s 仿真时间；遮挡固定 775 步/38.75 s。
+注意：沿用既有两场景配置；无遮挡为 seed 7 的小位置扰动，遮挡为对齐布局，且相机不同。
+跨场景不是相同 qpos，差 2 个控制步。因此比较的是这两种固定场景的条件收益，
+不能将跨场景的全部时差严格归因于遮挡，也不能据此宣布普适的遮挡程度—加速因果关系。
+
+任务墙钟中位数（秒；每格 n=6；不是配对差值的中位数）
+场景       每次额外延迟ms   Serial     Naive      Dynamic
+independent      0          2.6466   2.6939   2.6562
+independent     50          2.7626   2.6932   2.6969
+independent    100          2.8771   2.7793   2.7564
+independent    200          3.0882   2.8787   2.8784
+independent    500          3.6809   3.1885   3.1933
+occluded         0          2.6631   2.7145   2.6674
+occluded        50          2.7401   2.7519   2.7118
+occluded       100          2.8746   2.8042   2.7799
+occluded       200          3.0597   2.8608   2.9011
+occluded       500          3.7066   3.1975   3.2008
+
+配对净节省中位数及探索性 95% bootstrap 区间（ms，正数=候选更快）
+independent    0ms dynamic:   -10.5 [  -65.2,    25.8], wins=2/6
+independent    0ms naive  :   -35.5 [  -65.3,   -27.5], wins=0/6
+independent   50ms dynamic:    48.3 [   38.6,    85.7], wins=6/6
+independent   50ms naive  :    62.0 [   23.1,   106.2], wins=6/6
+independent  100ms dynamic:   110.8 [   86.6,   156.1], wins=6/6
+independent  100ms naive  :    90.7 [   77.3,   129.9], wins=6/6
+independent  200ms dynamic:   217.7 [  182.8,   256.3], wins=6/6
+independent  200ms naive  :   214.7 [  182.7,   252.8], wins=6/6
+independent  500ms dynamic:   501.7 [  444.0,   515.7], wins=6/6
+independent  500ms naive  :   464.4 [  404.2,   542.0], wins=6/6
+occluded       0ms dynamic:   -19.0 [  -38.8,    10.5], wins=2/6
+occluded       0ms naive  :   -48.3 [  -74.4,   -22.4], wins=0/6
+occluded      50ms dynamic:    10.4 [  -19.2,    68.1], wins=4/6
+occluded      50ms naive  :    14.7 [  -57.3,    46.1], wins=4/6
+occluded     100ms dynamic:   101.5 [   46.1,   127.5], wins=6/6
+occluded     100ms naive  :    62.1 [   23.9,   120.5], wins=6/6
+occluded     200ms dynamic:   192.2 [  120.3,   216.6], wins=6/6
+occluded     200ms naive  :   172.1 [  106.9,   268.9], wins=6/6
+occluded     500ms dynamic:   516.0 [  480.8,   525.6], wins=6/6
+occluded     500ms naive  :   509.0 [  463.0,   516.6], wins=6/6
+
+前台互斥成本均值（ms，行加和为总均值；完全遮挡场景）
+每次注入 0 ms:
+类别                            Serial       Naive      Dynamic
+compute_wait_poll                  8.526       2.616       3.660
+foreground_plan                    0.123       0.158       0.139
+image_acquire_format             192.055     207.727     187.366
+image_snapshot_copy                0.333       0.766       0.340
+logging                            8.260       8.440       8.175
+physics_step                    2275.800    2281.966    2270.739
+profiling_analysis                 0.094       0.034       0.035
+robot_control                     17.777      17.266      17.077
+runtime_bookkeeping                4.231       4.216       4.180
+scheduler_decision                 7.465      37.706      37.182
+shutdown_wait                      0.274       0.884       0.619
+state_validation                 142.035     143.532     143.224
+TOTAL                           2656.973    2705.309    2672.735
+后台及重叠/关键等待中位数（ms；与前台不相加）：
+perception_wall_s                                   4.796       9.303       6.373
+injected_wait_wall_s                                0.001       0.001       0.001
+perception_without_injected_wait_s                  4.796       9.302       6.372
+worker_thread_cpu_s                                 4.699       7.194       5.264
+compute_physical_residency_overlap_wall_s           0.000       6.786       3.650
+compute_actual_physics_overlap_s                    0.000       6.578       3.650
+exposed_critical_compute_s                          4.611       0.037       2.240
+wasted_compute_wall_s                               0.000       3.027       0.000
+每次注入 200 ms:
+类别                            Serial       Naive      Dynamic
+compute_wait_poll                398.456     167.808     183.394
+foreground_plan                    0.144       0.170       0.138
+image_acquire_format             181.420     210.812     185.633
+image_snapshot_copy                0.311       0.368       0.331
+logging                            8.068       8.258       8.233
+physics_step                    2295.850    2277.517    2288.533
+profiling_analysis                 0.587       0.212       0.202
+robot_control                     17.155      17.212      17.222
+runtime_bookkeeping                9.783       7.354       7.062
+scheduler_decision                12.009      52.536      57.624
+shutdown_wait                      0.168       0.144       0.286
+state_validation                 144.397     143.322     143.322
+TOTAL                           3068.347    2885.713    2891.980
+后台及重叠/关键等待中位数（ms；与前台不相加）：
+perception_wall_s                                 405.657     609.536     406.596
+injected_wait_wall_s                              400.242     600.473     400.410
+perception_without_injected_wait_s                  5.309       8.573       5.845
+worker_thread_cpu_s                                 5.130       7.192       5.145
+compute_physical_residency_overlap_wall_s           0.000     402.305     201.939
+compute_actual_physics_overlap_s                    0.000     370.320     184.905
+exposed_critical_compute_s                        395.601     164.039     181.651
+wasted_compute_wall_s                               0.000     203.461       0.000
+
+Dynamic 相比 Naive 的配对净收益（ms，正数=Dynamic 更快；不是与 Serial 比较）
+independent    0ms:    17.1 [  -13.6,    75.0], wins=5/6
+independent   50ms:    -4.2 [  -41.1,    26.5], wins=2/6
+independent  100ms:    16.2 [    0.6,    38.7], wins=5/6
+independent  200ms:     3.5 [  -11.9,    15.0], wins=3/6
+independent  500ms:    34.1 [  -36.3,    53.0], wins=4/6
+occluded       0ms:    37.0 [   -8.6,    69.3], wins=4/6
+occluded      50ms:    32.4 [  -44.3,    67.6], wins=4/6
+occluded     100ms:    25.1 [  -13.7,    57.2], wins=5/6
+occluded     200ms:     3.9 [  -52.2,    29.5], wins=3/6
+occluded     500ms:    -0.4 [  -13.5,    47.8], wins=3/6
+
+结果解释与下一步顺序
+1. 原生感知负载很轻。完全遮挡 Dynamic、0 ms 注入时，两次 PERCEIVE 总墙钟中位数
+   6.37 ms，直接暴露的计算等待约 2.24 ms；但任务前台平均采图/格式/复制 187.71 ms，
+   状态验证 143.22 ms，调度 37.18 ms（Serial 7.47 ms），物理积分/控制约 2287.82 ms。
+   所以目前主要耗时是物理仿真、采图和验证；在这种计算负载下进一步隐藏几毫秒感知，
+   不足以稳定抵消约 30 ms 的额外调度成本。不能把微操作驻留的 2 秒多都归给机械运动。
+
+2. 200 ms、完全遮挡场景，用全组均值可以解释净收益（单位 ms）：
+                              Serial          Naive         Dynamic
+   PERCEIVE 总墙钟              405.91          610.86          406.71
+   其中人工等待                 400.35          600.63          400.79
+   扣除人工等待后的处理            5.57           10.23            5.92
+   与物理微操作驻留的交集            0           403.65          201.72
+   与实际 env.step 的交集            0           371.26          185.00
+   直接阻塞关键等待链的计算        396.59          163.05          181.08
+   配对相对 Serial 实际净节省        0           182.63          176.37
+   Naive 的重叠更大，其中一段是最终丢弃的计算；不能把 403.65 ms 报成它节省的时间。
+   Dynamic 的等待/轮询减少 215.06 ms，调度增加 45.62 ms，采图/复制增加约 4.23 ms，
+   其他类别净减少约 11.16 ms，最终净省 176.37 ms。其他差分包括物理仿真速度波动，
+   不能全归因于依赖分析。均值用于加法分解；上表扫描中的中位数不满足逐项加法恒等式。
+
+3. 可报告的最小已测试获益点：无遮挡场景 Naive/Dynamic 都是每次额外 50 ms，6/6
+   配对更快；完全遮挡场景则为 100 ms，6/6 更快。50 ms 遮挡场景两种流水线的区间
+   都跨零（Dynamic 净省中位数 10.4 ms，区间 -19.2 至 68.1 ms），不能宣布稳定加速。
+   0 ms 下 Dynamic 未显著脱离噪声，Naive 在这次两场景各 6 次里均慢于 Serial。
+   这只是离散测试点的探索性结论；没有测出普适的精确盈亏平衡值。
+
+4. 减少无效计算已观察到，稳定增加速度尚未证明。完全遮挡的 30 个 Naive 正式回合
+   每回合一次空观测，共 30 次；Dynamic 对应为 0。每次均在确认可见后重采，随后才运动。
+   200 ms 时 Naive 每轮多浪费约 203.65 ms 后台墙钟，而其中实际 CPU 几何处理仅几 ms。
+   其等待能藏入机器人仿真推进中，因此不能把减少的 203.65 ms 当成 Dynamic 的净时间
+   优势；遮挡场景所有负载下，Dynamic 相对 Naive 的配对区间都跨零。
+   此处失效指“遮挡造成的空观测”，不是已经验证一般场景变化/缓存失效分析的全部效果。
+
+5. 不同遮挡条件下目前只确认本次两固定场景的低负载收益表现不同；由于跨场景布局与
+   相机也不同、样本仅 6 对，不能推出遮挡程度导致某个普适加速规律。后续若研究纯遮挡
+   因果效应，应另加固定物体布局、受控改变可见性的实验，并加密 0--100 ms 测点。
+   这项后续实验不冒充本轮已经完成的证据。
+
+6. 在增加新模块前，优先沿现有代码审查两类可测开销：每个控制步重复的就绪/依赖扫描，
+   以及初始/抬升/释放/稳定后的重复采图和验证。保持状态有效性与成功判据，分别消融，
+   避免一次更改两者。本轮没有执行这些性能优化，保留当前基准供下一步配对。
+
+报告中的 180 次为仿真真实接触执行，不是逻辑计时桩；额外计算延迟是人为 sleep，感知为
+已知颜色/尺寸几何处理。无真实神经模型调用、无真机效果结论。图中的三模式详细时间线
+取遮挡 200 ms、repeat 0，仅为事件实例；完整统计来自全部 6 次，不能将实例当作中位数。

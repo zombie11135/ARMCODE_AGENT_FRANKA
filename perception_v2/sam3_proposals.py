@@ -14,7 +14,7 @@ from runtime.perception_pipeline import serialized_resource
 
 
 class SAM3Proposals:
-    def __init__(self, checkpoint, *, device="cuda", confidence=.35):
+    def __init__(self, checkpoint, *, device="cuda", confidence=.35, model=None):
         import torch
         from sam3.model_builder import build_sam3_image_model
         from sam3.model.sam3_image_processor import Sam3Processor
@@ -27,14 +27,18 @@ class SAM3Proposals:
             raise ValueError("confidence must be in [0, 1]")
         self.confidence = float(confidence)
         started = time.perf_counter()
-        self.model = build_sam3_image_model(
+        self.model = model if model is not None else build_sam3_image_model(
             checkpoint_path=str(self.checkpoint), load_from_HF=False,
             device=device, eval_mode=True, enable_segmentation=True,
-            enable_inst_interactivity=False, compile=False)
+            enable_inst_interactivity=True, compile=False)
         self.processor = Sam3Processor(self.model, device=device, confidence_threshold=confidence)
         self.load_seconds = time.perf_counter()-started
 
-    @serialized_resource('gpu')
+    def validate_fragments(self, image, masks, negatives):
+        from .sam3_fragment_validator import SAM3FragmentValidator
+        return SAM3FragmentValidator(self)(image, masks, negatives)
+
+    @serialized_resource("gpu")
     def predict(self, color_bgr, prompts, *, min_mask_pixels=32):
         from PIL import Image
         torch = self.torch

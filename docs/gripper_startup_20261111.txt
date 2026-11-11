@@ -1,0 +1,71 @@
+2026-11-11：FR3 pilot01 夹爪初始化失败排查
+
+失败任务：runs/fr3-timing-pilot01-hsNrFDV3/
+目标：西瓜霜 -> 蓝色盘子；抗病毒口服液 -> 粉色盘子。
+报告 failed_action=initialize/hardware、failure_type=gripper_error、completed_actions=[]。
+错误：Gripper not ready (fault=0x00); activate explicitly first。
+入口总时间约 8.283 s；服务加载 4.456 s、相机启动预热 3.162 s，硬件初始化约 0.079 s 后失败。
+尚未进入 home/任务首帧/抓放。Stopped wrist camera 是退出清理，不是根因。
+
+用户随后在主机运行 hardware.cli gripper status，提供了：
+  activated=true, activation_state=0, go_to=false, fault=9 (0x09), ready=false
+  position_raw=3, current_ma=0, object_state_label=not_applicable
+  session.active=false, monitor_alive=false, successful_status_reads=1,
+  write_register_requests=0, execution_enabled=false
+这是用户执行的一次真实只读采样，不是 agent 在当前工具环境中成功读取的设备状态。
+当前工具会话此前尝试相同只读命令时，配置中的 /dev/serial/by-id 路径不可见；不能据此说
+用户主机没有设备。用户返回的数据说明主机能完成至少一帧协议读取。
+
+解释
+Robotiq 协议的 gACT 是激活请求位的回显，不能单凭 activated=true 判断激活已完成。
+ready 需要 activated=true、activation_state=3、fault=0；gSTA=0 为 reset/automatic-release
+状态，gSTA=1 才表示激活中。此帧不足以证明夹爪损坏，也不能断言只要多等一定会恢复。
+0x09 表示至少 1 秒未通信；status() 只读一帧，不建立后台保活，active=false 等是预期值。
+任务报错时 fault=0x00 和后来 status 首读 fault=0x09 是不同时间的样本，不互相矛盾。
+现有 start_session 会只读轮询启动 0x09，并在故障不清除时超时停止。
+已有会话中的新故障仍会锁存并阻止后续动作，不因后面读到好帧自动恢复。
+
+官方资料（检索摘要核对 gACT/gSTA/0x09 定义；全文直接抓取受服务响应限制）：
+https://assets.robotiq.com/website-assets/support_documents/document/online/2F-85_2F-140_Instruction_Manual_Gen_HTML_20190524.zip/2F-85_2F-140_Instruction_Manual_Gen_HTML/Content/4.%20Control.htm
+https://assets.robotiq.com/website-assets/support_documents/document/2F-85_2F-140_Instruction_Manual_e-Series_PDF_20190227.pdf
+本地既有说明：docs/fr3_hardware.txt，第 6 部分；其中路径/旧参数仅作历史参考。
+
+代码改动（未连接设备验证）
+hardware/runtime.py：Hardware.attach 在启动通信后，对 activated=true、gSTA=0/1、fault=0、
+go_to=false 的状态给出有限的只读稳定等待，使用现有 startup_timeout_s（当前 1 s）和
+poll_interval_s。这样暂态可能在下一帧就绪，不再直接把 gACT 置位当作已经完成激活。
+如果状态始终未就绪，最后仍调用 require_ready=True 并停止；不会为通过检查而自动复位
+已置位的夹爪，也不循环重试动作。原先 activated=false 时的既有激活路径保持不变。
+正常已就绪立即继续；等待中新故障仍锁存并退出；未通过前不绑定可执行机械臂接口。
+hardware/robotiq.py：未就绪异常增加 activated、activation_state、go_to，保留 fault，避免
+以后失败报告只有 fault=0x00 而看不到关键状态。
+tests/test_robotiq_session.py：增加暂态恢复、持续未就绪、新故障、已就绪不重激活、
+原未激活路径五种内存串口回归，检查不产生意外写指令或机械臂运动。
+
+改动前副本、哈希与测试日志：runs/hardware_validation/gripper_startup_20261111/
+既有未提交修改保留，不切换硬件配置、不降低就绪门槛、不改放置/抓取/计时协议。
+离线测试通过不代表当前真实夹爪已恢复。本轮没有发送真实激活、开合、复位或机械臂命令。
+
+现场下一步
+优先在持续保活的会话中看稳定状态，不要每隔几秒重新运行一次单帧 status 来判断持续通信。
+只读方式：
+  .venv-mobileclip2-fr3/bin/python -m hardware.cli \
+    --config config/hardware/fr3.yaml gripper console
+进入后 status，可持续观测，quit 释放串口。这种会话不允许动作命令。
+也可用 gripper check --duration 5 --interval 0.1，区分 communication_passed 与
+all_steady_samples_ready。该检查结束后不继续保活。
+
+若通信稳定但仍 activation_state=0 / ready=false，且现场确认夹爪空载、夹指范围无人，
+由操作者显式进入允许动作的终端：
+  .venv-mobileclip2-fr3/bin/python -m hardware.cli \
+    --config config/hardware/fr3.yaml gripper console --execute
+依次查看 status，确有需要时输入 activate，再输入 status。
+activate 可能使夹指执行自标定运动；有持物或状态不确定时不要用它来绕过故障。
+恢复目标：ready=true、activation_state=3、fault_hex=0x00。
+quit 后才能运行 Agent，因为串口独占；不要同时开两个夹爪客户端。
+持续 0x09 或新故障应先排查通信/设备状态，不能通过重试整条抓放任务证明已恢复。
+原 pilot01 失败日志保留；后续复跑使用新的 trial 标记和独立目录。
+
+验证结果：会话/诊断/接触策略/Agent 接线测试 81 passed；原始 Robotiq 协议测试 13 passed。
+日志分别为 tests.log 和 protocol_tests.log。没有运行已知受沙箱 socket 限制的进程测试，
+不据此声称全量硬件回归或实机恢复通过。git diff --check 通过。

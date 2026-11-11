@@ -28,6 +28,8 @@ python -m app --help
 以上检查无需 GPU、模型、API Key 或机器人。完整运行需另行配置，详见
 [环境与配置](docs/SETUP.md)、[第三方依赖](THIRD_PARTY.md)。
 整块数据盘迁移、新电脑依赖和本机配置备份见 [电脑与硬盘迁移说明](docs/machine_migration.txt)。
+本地 VLM 环境、模型对比和 Agent 接入见 [本地 VLM 说明](docs/local_vlm.txt)。
+运动速度参数、默认阶段计时和每轮耗时报告见 [速度与计时说明](docs/task_timing.txt)。
 多人协作使用任务分支和 PR，见 [协作约定](CONTRIBUTING.md)；
 首次建立干净 Git 仓库见 [发布指令](docs/RELEASING.md)。
 

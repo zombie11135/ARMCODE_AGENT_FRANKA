@@ -1,3 +1,4 @@
+from hardware.config import ArmConfig
 """Agent contact-close adapter, validated on a simulated Modbus device only."""
 from dataclasses import asdict, replace
 import json
@@ -222,7 +223,7 @@ def test_agent_callback_closes_once_and_allows_lift_after_contact_stop(device):
     from hardware.agent_geometry import execute_grasp
     from hardware.interfaces import Pose6D
     driver, serial, _ = device
-    arm = Mock()
+    arm = Mock(config=ArmConfig())
     arm.motion_guard = None
     arm.get_pose.return_value = Pose6D(.3, 0, .35, 3.14, 0, -1.57)
     context = RuntimeContext(arm=arm, gripper=driver)
@@ -249,7 +250,7 @@ def test_agent_continues_to_lift_after_confirmed_current_stop(device):
     from hardware.interfaces import Pose6D
     driver, serial, _ = device
     serial.current_fn = lambda p: 100 if p >= 70 else 20
-    arm = Mock()
+    arm = Mock(config=ArmConfig())
     arm.motion_guard = None
     arm.get_pose.return_value = Pose6D(.3, 0, .35, 3.14, 0, -1.57)
     context = RuntimeContext(arm=arm, gripper=driver)

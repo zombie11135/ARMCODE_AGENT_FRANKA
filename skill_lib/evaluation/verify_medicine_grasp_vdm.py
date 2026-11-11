@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.timing import timed_stage
 from services.openai_chatgpt_vlm_client import OpenAIChatGPTVLMClient
 
 
@@ -135,6 +136,7 @@ class VerifyMedicineGraspVDMSkill(BaseSkill):
     name = "verify_medicine_grasp_vdm"
     description = "基于抓取前后 global + wrist 四图，调用 VLM 进行视觉差分与抓取结果判别。"
 
+    @timed_stage('抓取结果实际验证')
     def run(
         self,
         medicine_query: str,

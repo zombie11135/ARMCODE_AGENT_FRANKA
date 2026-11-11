@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 
 import requests
+from .openai_chatgpt_vlm_client import OpenAIChatGPTVLMClient
 
 
 class QwenVLClient:
@@ -20,6 +21,7 @@ class QwenVLClient:
         self.api_key = api_key
         self.model_name = model_name
         self.timeout = timeout
+        self._transport = OpenAIChatGPTVLMClient(base_url, api_key, model_name, timeout)
 
     def chat(
         self,
@@ -46,12 +48,7 @@ class QwenVLClient:
             "temperature": temperature,
         }
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-        )
+        response = self._transport._post(payload)
 
         return self._parse_response(response)
 
@@ -120,12 +117,7 @@ class QwenVLClient:
             "temperature": temperature,
         }
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-        )
+        response = self._transport._post(payload)
 
         return self._parse_response(response)
 

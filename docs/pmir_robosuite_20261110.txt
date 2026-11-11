@@ -1,0 +1,123 @@
+2026-11-10：首轮 PMIR + 动态依赖 + robosuite 调度实验
+
+1. 已完成的交付物
+
+在 SSD 活动仓库 /home/wpy/projects/armcode-agent (1)/armcode-agent 新增独立实验入口。
+给出受限 CaP Python，可以自动展开微操作、输出依赖原因，在实际 MuJoCo 接触仿真中
+执行串行/动态图调度，并记录事件、计时、状态验证、初末图像和可见性证据。
+全部 502 个开工时已有受版本控制及未跟踪文件保持逐字节不变；未部署、未连接硬件、未改碎片配置。
+原始文件哈希：runs/experiments/pmir_20261110/initial_files.json。
+
+复用已有 .venv-robosuite：Python 3.11、robosuite 1.5.2、MuJoCo 3.3.1。
+复用 simulation/robosuite_backend 的 Panda、控制步、接触、抬升和稳定放置判据。
+没有修改旧后端或原 CaP/Hybrid 入口；原来目录 recovery_aware_cap_mvp 的逻辑模型也未改动。
+
+新增实现：
+  runtime/pmir/graph.py、compiler.py、scheduler.py
+  simulation/pmir/adapter.py、perception.py、experiment.py、README.md
+  tests/test_pmir.py、tests/test_pmir_robosuite.py
+  scripts/plot_pmir.py
+
+2. 实际任务与推理边界
+
+输入：
+  def policy():
+      pick_place("red_cube", "red_goal")
+      pick_place("blue_cube", "blue_goal")
+
+自动展开 28 个微操作：两套 CAPTURE、PERCEIVE、GRASP_PLAN、MOTION_PLAN，以及实际
+抬高/接近/下降/关爪/抬升/运输/下降/张爪/撤离/稳定验证阶段。
+图中边分别记录 data、control、physical，以及运行时追加的 event；资源占用单独建模。
+只有主线程调用 MuJoCo/EGL，后台只处理复制的 RGB-D 与版本标记。
+实际接触运动只调用控制器步进，技能没有用写物体 qpos 的方式伪造抓放。
+
+independent：默认视角，两个对象都可见，种子 7/8/9 轻微扰动初始布局。
+occluded：固定侧面相机、固定对齐的两个方块；初始蓝方块有效掩膜为 0 像素。
+红方块实际抬起后，拍照检测到蓝方块且其速度稳定，释放 visible:blue_cube。
+蓝方块 CAPTURE/PERCEIVE/GRASP_PLAN 可以在红方块运输、释放等阶段开始；蓝方块依赖
+当前机械臂状态的 MOTION_PLAN 和物理动作仍等待红方块完成验证。
+没有预设“动作 60% 时可见”；事件来自图像和实测仿真状态。遮挡的多个种子实际是同一
+固定布局的重复，不能当成跨布局泛化试验。
+
+当前感知：已知颜色、已知轴对齐方块尺寸和桌面高度的 RGB-D 几何估计，无神经网络。
+它输出的位置确实进入抓取接近控制，后台快照不含物体或机器人真值。
+当前仍使用仿真真值的部分：状态版本/稳定性、接触检查、抬升检查、持物偏移和放置判据。
+MOTION_PLAN 是受控桌面的名义笛卡尔路点，不是完整碰撞搜索或通用运动规划器。
+
+3. 已完成的测量及解释
+
+正式测量在测试结束后逐批顺序运行，设置 OPENBLAS_NUM_THREADS=1、OMP_NUM_THREADS=1。
+native_final/、latency_200ms/ 各有 4 次预热 + 12 次测量；每场景/模式 3 个测量样本。
+paced_occluded/ 是额外 1 对按 20 Hz 节拍运行的遮挡任务，未预热，用于节拍机制检查。
+全部 26 次正式测量均完成双物体接触抓放，全部配对初始 qpos 哈希一致、完成顺序一致。
+fast 模式每个配对的控制步数也完全相同，没有通过少执行动作获取时间差。
+这些是小样本机制验证，不是可靠性统计或论文级加速结论。
+
+主机总墙钟中位数，单位秒：
+
+负载/场景                         串行       动态图
+无延时注入 / 普通布局              2.743      2.778
+无延时注入 / 遮挡布局              2.705      2.758
+每次感知额外 200 ms / 普通布局     3.164      3.014
+每次感知额外 200 ms / 遮挡布局     3.170      3.172
+
+无注入时感知工作很短，动态图在这批数据中没有加速，部分样本还有较明显长尾。
+注入 200 ms 后，动态图计算与物理微操作占用区间重叠约 0.203 s；等待计算的空闲时间减少，
+但遮挡组总墙钟收益仍不稳定。各配对结果、P90、原始 spans 均保留，未挑选有利样本作总体结论。
+时间线展示的是 seed=7 的一个配对，并不代表三次测量的中位数。
+
+按 20 Hz 墙钟节拍的单次遮挡配对（同样注入 200 ms）：
+  串行：墙钟 39.725 s，仿真 39.450 s，789 控制步。
+  动态：墙钟 39.364 s，仿真 39.100 s，782 控制步。
+  差异主要表现为计算等待期间维持控制的空闲步数变化；完成的物理阶段相同。
+  两轮各有 1 次超过 5 ms 的节拍迟到，最大约 21.4 ms；它不是硬实时保证。
+  只有一对，不能据此宣称稳定约 0.9% 加速。
+
+fast 模式只在控制动作期间推进物理，等待纯计算时冻结仿真；sim_duration_s 不是完整
+主机任务时间。real_time 模式在等待计算时仍步进保持控制。两种模式均不表示真实 FR3 吞吐。
+总体计时包含任务内采集、可见性检查、调度、版本监视、验证、事件写入及后台收尾；
+编译、环境初始化、结果图片导出不计入该执行墙钟，并另存相关耗时或说明。
+微操作占用区间可能包含主线程穿插采集，另报计算与控制步调用区间的交集，不能简单累加。
+
+早期 smoke/ 为冒烟结果；native/ 曾与测试同时运行，其计时已明确排除，保留供审计。
+native_exclusion.txt 解释排除原因，正式结果使用 native_final/。
+
+4. 验证与产物
+
+已有 robosuite 后端基线：9 passed。
+新增 PMIR 核心和实际仿真测试：23 passed（pmir_final_tests.log）。
+PMIR 核心加原流水线/CaP/Hybrid/恢复回归：124 passed（existing_regression.log）。
+测试集有重叠，不相加。没有重新运行整套硬件 IPC 回归，也没有声称此前沙箱限制已解决。
+检查了所有正式实验 source_sha256 与最终实现一致，初始 502 个文件哈希未变。
+
+实验根目录：runs/experiments/pmir_20261110/
+source_snapshot/ 保存与正式测量哈希一致的源码，verification.json 保存最终核对结果。
+每批：manifest.json、order.json、results.json、comparison.json。
+每轮：policy.py、graph_initial/final.json 与 .mmd、events.jsonl、physics_events.jsonl、
+      task_timing.json、result.json、before/after.png、before_rgbd.npz、visibility_*.png/.npz。
+图示：figures_reviewed/dependency_graph.svg、timeline.svg、visibility_evidence.png。
+图示仅为可读性消除传递冗余边，完整图保留全部边及原因。
+
+完整运行说明：simulation/pmir/README.md。
+不需要重新安装仿真环境，复跑必须选择不存在的输出目录。例如：
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  .venv-robosuite/bin/python -m simulation.pmir.experiment \
+    --output-dir runs/experiments/pmir_new_native --seeds 7 8 9 --warmups 1
+
+加入 --compute-delay-s .2 可复现注入负载；加入 --clock real_time 可测试节拍模式。
+这些选项与输出目录必须记录，不能混在同一总体加速数字中。
+
+5. 本轮未实现及下一步
+
+这是最小执行研究原型，尚不是完整 Physical Agent Execution Runtime。
+技能展开目前来自 observe/pick_place 的注册描述；没有自动理解任意 Python 技能源码。
+支持有限字面量循环与 if observe 条件，但不支持完整 CaP 语法，例如分支中的提前 return
+会明确拒绝。未知技能需要登记，登记为黑盒后形成保守全状态屏障；没有仿真 handler 不执行。
+没有新增 CODE_GEN、PEIP、通用抽屉/倒水、自动最小失效子图恢复或跨任务缓存。
+证据失效或物理失败时停止并保留完成前缀，不能叫作已经实现自动局部恢复。
+物理影响范围主要由技能契约提供，仿真监视只能在阈值内发现状态变化，未证明对复杂现场保守。
+
+下一步先剖析当前调度遍历、可见性检查、数据复制与线程切换的开销，解释为什么隐藏约
+0.20 s 计算后总墙钟收益仍波动；保持本轮原始数据和基线代码可追溯。
+随后接入更接近真实负载的常驻视觉/抓取计算，增加受控扰动和观测不充分的失败样本。
+先证明基础调度收益，再加入分支预测与局部恢复；继续保持仿真、真实模型调用、真机效果分开。

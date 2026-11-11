@@ -152,6 +152,13 @@ def build_occlusion_service(config):
         checkpoint = str(Path(load_config(config.hardware_config_path).perception.sam3_model_dir)/'sam3.pt')
     if not checkpoint:
         raise ValueError('Geometry occlusion requires a SAM3 checkpoint')
+    vlm_config = None
+    if (getattr(config, 'enable_vlm_fragment_assistance', False)
+            and getattr(config, 'planner_llm_base_url', '') and getattr(config, 'planner_llm_model', '')):
+        vlm_config = dict(base_url=config.planner_llm_base_url, api_key=config.planner_llm_api_key,
+                          model_name=config.planner_llm_model, timeout=min(15, config.vlm_timeout))
     params = dict(checkpoint=checkpoint, device=config.detector_device,
-                  output_dir=str(Path(config.capture_dir)/'occlusion_graph'))
+                  output_dir=str(Path(config.capture_dir)/'occlusion_graph'),
+                  enable_fragment_association=getattr(config, 'enable_fragment_association', False),
+                  fragment_vlm_config=vlm_config)
     return get_or_create_service('wrist_occlusion_graph', params, lambda: WristOcclusionService(**params))

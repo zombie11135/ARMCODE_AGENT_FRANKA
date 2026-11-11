@@ -1,0 +1,119 @@
+2026-11-09：流水线核对、可复现调度对照与首项优化
+
+活动仓库：/home/wpy/projects/armcode-agent (1)/armcode-agent
+分支：feat/occlusion-observation-scheduling，HEAD a01b3db，工作树包含既有未提交修改。
+实验根目录：runs/experiments/pipeline_20261109/
+initial_worktree.json、initial_tracked.diff、before/ 保存修改前哈希、差异和相关源码。
+没有 reset/clean、部署、启动模型服务、连接相机或执行机器人动作。碎片合并配置未改变。
+没有使用历史拍摄位姿或缓冲位。基准中的全零位姿只是相等性校验夹具，不能作为机器人坐标。
+
+1. 核对与修改
+
+TaskPerceptionPipeline 已有冻结首帧、后台分析、前台发布、epoch/任务/位姿校验。
+现有测试覆盖失效图像拒绝、候选缓存命中以及 RGB/点云/掩膜/ROI/内参/碰撞选项/
+场景/位姿/工作台变化后的缓存失效。本轮没有放宽这些校验，也没有改候选选择算法。
+新增 candidate_prefetch 的跳过原因，以及感知线程 shutdown_wait_s。
+
+runtime/perception_pipeline.py 的 ordered_bounded_map 原来未传递 ContextVar，
+内部工作线程的阶段与资源锁等待可能缺失于任务报告。现为每个提交复制独立上下文；
+不改变资源锁、工作线程上限和有序结果发布。
+
+HybridTaskRunner 原来仅在首次执行当前节点前预生成下一节点；修复时废弃旧结果后，
+修复后的执行尝试不再预生成下一节点。本轮将 start_prefetch 放到每次当前节点尝试前，
+因此修复执行能够与新 revision 的下一节点生成重叠。顺序、完成前缀和恢复预算不变。
+
+增加“子任务代码生成”“等待后台代码线程退出”计时；hybrid_trace.json 最后一个
+session_finished 事件包含 prefetch_jobs：node、revision、submitted/start/finished_s、
+queue_wait_s、duration_s、outcome、join_wait_s、cancelled、wasted_generation_s、
+work_after_invalidation_s（按实际路径存在）。worker 不写机器人状态或 trace 事件。
+outcome 区分 used、failed、invalidated、unused_task_ended。已开始的 HTTP 请求仍不能
+由 Future.cancel() 中断，保留 shutdown(wait=True)，防止任务报告结束后仍有未归档工作。
+
+2. 可复现入口与证据范围
+
+runtime/pipeline_benchmark.py 复用正式 TaskPerceptionPipeline 发布路径、HybridTaskRunner、
+CapCodeGenerator、AST 验证及 timing recorder；用显式模拟的首帧分析、执行反馈提供可控负载。
+它不构造硬件、没有采集或运动接口，也不读取真实标定、历史图像或缓冲槽位。
+任务固定为两个 grasp/place 对，场景分别为成功、首节点失败一次后恢复、首节点停止。
+
+四组：serial、perception（仅感知重叠）、policy（仅代码预生成）、both。
+串行组在容器阶段结束后启动相同的冻结帧分析并立即等待，保证工作量相同。
+因此这是固定输入的调度消融，不是直接运行正式 CLI 两个 disable 开关的端到端测试；
+正式串行入口可能重新采集图像、延后感知。候选预计算因缺少 transforms 明确跳过。
+模拟 observe 成功不是目标身份确认，也没有验证任何抓取或放置成功率。
+
+默认每组预热 1 次、测量 3 次，顺序由固定 seed 打乱；每次输出独立目录，拒绝覆盖。
+入口计时包含首节点生成、感知/容器阶段、执行、修复、线程退出及报告写入开销，
+不含导入、设备初始化、模型加载和初始任务图规划；不能叫作冷启动端到端耗时。
+manifest.json 记录源码哈希、解释器、输入、延时、采样参数；order.json 保存试验顺序。
+各轮保存 task_timing.json、perception_pipeline.json、hybrid_trace.json、task_state.json、
+各节点 .py/.cap.json 和 result.json。comparison.json 分开预热与测量，保存中位数及极值。
+只有成功、相同动作尝试与修复次数的配对样本才计算速度比，失败停止不算加速。
+
+运行新的离线对照（output-dir 必须尚不存在）：
+  .venv-mobileclip2-fr3/bin/python -m runtime.pipeline_benchmark \
+    --output-dir runs/experiments/pipeline_new_replay \
+    --repeats 3 --warmups 1 --scenarios success repair_first stop_first
+
+可选真实代码模型模式，仅连接已有 localhost 服务，不启停服务：
+  .venv-mobileclip2-fr3/bin/python -m runtime.pipeline_benchmark \
+    --output-dir runs/experiments/pipeline_real_code_new \
+    --model-mode local --model qwen3vl-8b-awq --base-url http://127.0.0.1:8010/v1 \
+    --repeats 3 --warmups 1 --scenarios success repair_first
+该模式使用真实模型生成代码，但感知、执行仍模拟；code_s 只作用于 stub 模式。
+模型请求遵循现有全局 gpu 资源锁，未按历史双 GPU 配置擅自解除串行化。
+本次 localhost GET /v1/models 被沙箱以 Operation not permitted 拒绝。
+没有真实模型调用结果，不能判断服务是否在线，也没有冷/热模型比较或真机效果结论。
+
+导出实际 span 区间图（已生成 optimized_repair_timeline.svg / .png）：
+  .venv-mobileclip2-fr3/bin/python scripts/plot_pipeline_benchmark.py \
+    --run-dir runs/experiments/pipeline_20261109/optimized --scenario repair_first \
+    --output runs/experiments/pipeline_new_timeline.svg
+
+3. 本轮模拟数据
+
+默认注入：分析 0.12 s，容器 0.16 s，每次代码请求 0.10 s，每个子任务尝试 0.15 s。
+baseline/ 和 optimized/ 各为 4 组 × 3 场景 × (1 次预热 + 3 次测量)。
+所有场景均满足预定结果；stop_first 的预定结果是停止失败，不计成功完成任务。
+中位总墙钟，单位秒：
+
+                      串行     仅感知    仅代码    双流水线
+成功：优化前          0.795    0.672     0.696     0.575
+成功：优化后          0.795    0.675     0.696     0.575
+首节点修复：优化前    1.051    0.931     1.052     0.932
+首节点修复：优化后    1.052    0.930     0.952     0.831
+
+修复组始终尝试 A,A,B；修复次数都是 1。双流水线前台代码时间约从 0.302 s 降至
+0.201 s，有效预生成与模拟执行的重叠恢复至约 0.100 s。
+旧 revision 的约 0.101 s 预生成仍浪费，未算作有效重叠或缓存命中。
+policy_overlap_s 包含所有后台代码（包括浪费），useful_policy_overlap_s 只统计最终使用
+的 node/revision。duration_s 为总墙钟；span 并集/交集与 job 工作时间之和不能互换。
+baseline_sources/ 与 baseline/manifest.json 的源码哈希逐一一致，供优化前源码审查。
+replay_baseline.py 可在不改工作树的前提下加载归档调度器和基准，重新执行原始对照。
+
+slow_code_stop/：代码延时 0.30 s、执行 0.03 s，1 次预热 + 2 次测量。
+policy / both 在停止后仍等待后台线程约 0.267 / 0.268 s，浪费代码约 0.301 s。
+这证明存在不可取消工作拖延收尾的机制，不证明实际 HTTP 请求是当前真机瓶颈。
+未改为直接遗弃工作线程，后续需要真实请求时延、超时及服务取消能力的证据。
+
+4. 验证
+
+修改前指定核心集：71 passed。
+修改后流水线、CaP、计时及恢复集：104 passed（包含新增的 18 项测试）。
+新增覆盖上下文传播、嵌套区间去重、四组动作一致性、不能从失败宣称加速、
+预生成失败后前台回退、运行中失效工作计时、修复后新 revision 重叠且旧版不执行。
+
+扩大运行 scripts/check_core.py：765 passed, 2 skipped, 10 failed。
+完整日志：runs/experiments/pipeline_20261109/core_regression.txt。
+10 个失败为 9 个模拟夹爪进程通信测试及 1 个 builtin FR3 接线测试；均出现
+multiprocessing Manager 创建 socket 被沙箱拒绝，随后已有清理代码调用尚未注册的
+manager.shutdown 引起 AttributeError。没有修改该硬件模块或屏蔽测试；全量回归未通过。
+不将 71/104/765 相加，也不将这些数字当作模型或实机效果证据。
+
+5. 下一步
+
+在允许 localhost 请求的会话先跑真实代码模型 + 模拟执行，观察生成等待、失效工作、
+退出等待和 gpu 锁排队，保持相同任务、反馈与采样参数。此处不能先解除资源锁。
+再以保存图像和真实感知后端补充固定帧对照；候选预计算命中与错误节点浪费需要单列。
+真机对照仍需当前现场的标定、位姿、设备状态和行动授权，并保持动作/速度/预算一致。
+本轮没有推进在线 InstaOrder、碎片合并、目标信息增益算法或真实清障，避免同时改变变量。

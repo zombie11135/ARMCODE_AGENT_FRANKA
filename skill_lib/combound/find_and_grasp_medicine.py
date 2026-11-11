@@ -12,6 +12,7 @@ from scipy.spatial.transform import Rotation as R
 from core.skill_base import BaseSkill, SkillResult
 from runtime.observation_memory import fresh_skill_camera, memory_for, StaleObservationError
 from runtime.perception_pipeline import ordered_bounded_map
+from runtime.timing import timed_stage
 from skill_lib.combound.select_obj_by_text import SelectObjectByTextSkill
 from skill_lib.evaluation.verify_medicine_ocr import VerifyMedicineOCRSkill
 from skill_lib.manipulation.plan_grasp_with_anygrasp import PlanGraspWithAnyGraspSkill
@@ -146,17 +147,20 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 return recognition
             selected = recognition.data["selected_instance"]
 
+            grasp_selection = selected
+            if prepared_node is not None:
+                # Identity recognition may only supply a box. Bind the already
+                # verified graph mask before the input builder checks for it.
+                grasp_selection = dict(selected, mask_npy_path=prepared_node['visible_mask_path'],
+                                       mask_path=None, bbox=prepared_node['bbox_xyxy'])
             grasp_input = self._build_grasp_input(
                 capture=capture,
                 image_path=image_path,
-                selected=selected,
+                selected=grasp_selection,
                 query=query,
-                use_mask_for_grasp=use_mask_for_grasp,
+                use_mask_for_grasp=use_mask_for_grasp or prepared_node is not None,
                 fallback_intrinsics=fallback_intrinsics,
             )
-            if prepared_node is not None:
-                grasp_input.update(mask_npy_path=prepared_node['visible_mask_path'],
-                                   mask_path=None, bbox=prepared_node['bbox_xyxy'])
 
             result_data = dict(recognition.data, grasp_input=grasp_input)
 
@@ -312,6 +316,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 pass
             return SkillResult(success=False, data={}, error=error)
 
+    @timed_stage('遮挡后二次观察重试')
     @fresh_skill_camera('grasp_planning_retry')
     def _reobserve_target_and_retry_grasp(
         self,
@@ -433,6 +438,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
                 error=f"二次观察抓取恢复失败: {e}",
             )
 
+    @timed_stage('目标身份识别')
     def _recognize_image(self, **options):
         from skill_lib.perception.reference_recognition import RecognizeObjectSkill
         from services.object_names import ObjectNameResolver
@@ -609,6 +615,7 @@ class FindAndGraspMedicineSkill(BaseSkill):
             ocr_verification=ocr_verify_result.data if ocr_verify_result is not None else None,
             ranked_candidates=select_result.data["ranked_candidates"]))
 
+    @timed_stage('目标RGB-D拍摄')
     def _capture(self, camera_name: str) -> Dict[str, Any]:
         camera = self.context.require("camera")
         if camera_name == "wrist":

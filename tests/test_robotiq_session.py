@@ -3,6 +3,7 @@ from dataclasses import replace
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import struct
 import tempfile
 import threading
@@ -13,7 +14,7 @@ from unittest.mock import Mock, patch
 from hardware.config import GripperConfig
 from hardware.gripper_console import dispatch, run_console
 from hardware.robotiq import GripperError, GripperCurrentLimitError, GripperStatus, Robotiq2F85, crc16
-from hardware.runtime import LegacyPoseAdapter
+from hardware.runtime import Hardware, LegacyPoseAdapter
 
 
 class SimulatedSerial:
@@ -135,6 +136,66 @@ class SessionTests(unittest.TestCase):
             driver.open()
         self.assertEqual(serial.actions, [])
         self.assertTrue(serial.closed)
+
+    def test_agent_waits_for_lagging_activation_state_after_09_without_writes(self):
+        driver, serial, _ = self.device(startup_fault=9, execute=False)
+        serial.flags = 0x01  # gACT=1, gSTA=0: not yet ready.
+        serial.activation_reads = 4  # Status recovers after communication does.
+        arm, context = Mock(), SimpleNamespace(camera=None)
+        hardware = Hardware(SimpleNamespace(gripper=driver.config), arm, driver, None)
+        hardware.attach(context, monitor_gripper=True)
+        self.assertIs(context.arm, arm)
+        self.assertTrue(driver.assert_healthy(require_ready=True).ready)
+        self.assertGreaterEqual(driver.session_info()['successful_status_reads'], 4)
+        self.assertEqual(serial.actions, [])
+        arm.move_pose.assert_not_called()
+
+    def test_agent_persistently_unready_activation_fails_without_reset_or_attachment(self):
+        driver, serial, _ = self.device(startup_fault=9)
+        serial.flags = 0x01
+        arm, context = Mock(), SimpleNamespace(camera=None)
+        hardware = Hardware(SimpleNamespace(gripper=driver.config), arm, driver, None)
+        with self.assertRaisesRegex(GripperError, r'activated=True, activation_state=0'):
+            hardware.attach(context, monitor_gripper=True)
+        self.assertGreater(driver.session_info()['successful_status_reads'], 2)
+        self.assertFalse(hasattr(context, 'arm'))
+        self.assertEqual(serial.actions, [])
+        arm.move_pose.assert_not_called()
+
+    def test_agent_wait_does_not_clear_new_fault_or_continue_attachment(self):
+        driver, serial, _ = self.device()
+        serial.flags = 0x01
+        original = driver.status
+        def status():
+            if driver._read_count >= 1:
+                serial.fault = 13
+            return original()
+        arm, context = Mock(), SimpleNamespace(camera=None)
+        hardware = Hardware(SimpleNamespace(gripper=driver.config), arm, driver, None)
+        with patch.object(driver, 'status', side_effect=status):
+            with self.assertRaisesRegex(GripperError, '0x0d during active'):
+                hardware.attach(context, monitor_gripper=True)
+        self.assertFalse(hasattr(context, 'arm'))
+        self.assertEqual(serial.actions, [])
+        arm.move_pose.assert_not_called()
+
+    def test_agent_ready_gripper_attaches_without_reactivation(self):
+        driver, serial, _ = self.device()
+        arm, context = Mock(), SimpleNamespace(camera=None)
+        hardware = Hardware(SimpleNamespace(gripper=driver.config), arm, driver, None)
+        hardware.attach(context, monitor_gripper=True)
+        self.assertIs(context.arm, arm)
+        self.assertEqual(serial.actions, [])
+        arm.move_pose.assert_not_called()
+
+    def test_agent_initially_inactive_gripper_retains_existing_activation_path(self):
+        driver, serial, _ = self.device(ready=False)
+        arm, context = Mock(), SimpleNamespace(camera=None)
+        hardware = Hardware(SimpleNamespace(gripper=driver.config), arm, driver, None)
+        hardware.attach(context, monitor_gripper=True)
+        self.assertTrue(driver.assert_healthy(require_ready=True).ready)
+        self.assertEqual(serial.actions, [0, 1])
+        arm.move_pose.assert_not_called()
 
     def test_keepalive_runs_while_foreground_waits(self):
         driver, serial, _ = self.device(execute=False)

@@ -1,3 +1,4 @@
+from hardware.config import ArmConfig
 """Parallel-jaw equivalent poses using synthetic calibration and fake devices."""
 from copy import deepcopy
 import json
@@ -143,7 +144,7 @@ def test_saved_preview_and_mock_execution_use_the_selected_equivalent_pose(scene
     np.testing.assert_allclose(saved[0,4:13].reshape(3,3),plan['selected']['rotation_matrix'])
     preview = load_scene(root)
     np.testing.assert_allclose(preview['base_grasp'],plan['geometry']['base_T_grasp'])
-    arm, gripper = Mock(), Mock()
+    arm, gripper = Mock(config=ArmConfig()), Mock()
     gripper.assert_healthy = Mock(return_value=SimpleNamespace(object_detected_closing=True))
     arm.get_pose.return_value = Pose6D(*plan['best_grasp_base_mrad'])
     context = RuntimeContext(arm=arm, gripper=gripper)

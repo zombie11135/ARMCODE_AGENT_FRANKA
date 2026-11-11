@@ -37,7 +37,7 @@ def recover_once(robot, target, graph, decision):
     poses = cfg.geometry_occlusion_recovery_view_poses_mmrad
     if any(len(p) != 6 or not all(math.isfinite(float(v)) for v in p) for p in poses):
         raise ValueError('Recovery views require finite flange XYZ/RPY in mm/rad')
-    views = {f'view_{i+1}': list(p) for i, p in enumerate(poses)} if cfg.execute else {}
+    views = {f'view_{i+1}': list(p) for i, p in enumerate(poses)}
     snapshot = build_recovery_snapshot(graph=graph, decision=decision, target=target,
         goal=getattr(robot.context, 'task_goal', target),
         clear_count=robot.occlusion_recovery_counts.get(target, 0),
@@ -45,7 +45,7 @@ def recover_once(robot, target, graph, decision):
         buffers=cfg.geometry_occlusion_buffer_poses_mmrad, slots_used=robot.geometry_buffer_slots_used,
         observation_count=state['observation_counts'].get(target, 0), observation_limit=budget,
         history=state['history'], views=views, allow_clear=cfg.enable_occlusion_recovery,
-        max_image_fraction=cfg.occlusion_blocker_max_image_area_ratio)
+        max_image_fraction=cfg.occlusion_blocker_max_image_area_ratio, planning_only=not cfg.execute)
     actions = snapshot['allowed_actions']
     print('[occlusion recovery] geometry='+decision['status'],
           'clear_candidates='+str(sum(a['action'] == 'clear' for a in actions)),
@@ -77,6 +77,15 @@ def recover_once(robot, target, graph, decision):
     state['history'].append(dict(event='llm_choice', target=target, **selected))
     save_recovery_state(robot)
     print('[occlusion recovery]', selected['action_id'], selected['reason'])
+    if selected['action'] in ('plan_clear', 'plan_observe'):
+        from agents.information_plan import build_information_plan
+        plan = build_information_plan(snapshot, selected)
+        path = Path(cfg.nesyro_gate_trace_path).with_name('information_plan.json')
+        atomic_json(path, plan)
+        return 'stop', _failure('geometry_information_plan_ready',
+            '已生成获取更多信息的动作计划；尚未执行，等待新场景证据后继续目标任务。',
+            recovery_pending=True, information_plan=plan, information_plan_path=str(path),
+            recovery_snapshot=snapshot)
     if selected['action'] == 'pause':
         reason = selected['reason']
         if 'geometry:blocker_quality_insufficient' in snapshot['clear_unavailable_reasons']:

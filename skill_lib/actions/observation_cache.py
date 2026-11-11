@@ -30,6 +30,9 @@ def _publish(robot, target, observation, data):
         from .task_containers import remember_container
         remember_container(robot, target, data)
     robot.observations[target] = observation
+    if data.get('geometry_occlusion'):
+        from runtime.information_state import record_information
+        record_information(robot, target, data['geometry_occlusion'])
     if observation['kind'] == 'container':
         key = observation['container_key']
         robot.place_plans[key] = data

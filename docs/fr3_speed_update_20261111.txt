@@ -1,0 +1,29 @@
+2026-11-11：加快 FR3 实验运动
+
+用户要求提高移动速度。本次没有启动机械臂。
+config/hardware/fr3.yaml：speed_scaling 0.20 -> 0.50；place_retreat_speed_scaling 0.05 -> 0.15；新增 grasp_contact_speed_scaling=0.20。
+柔和放置的 pre_release/release 仍使用 place_descent_speed_scaling=0.03，夹爪速度和力设置未改。
+hardware/config.py：加入 grasp_contact_speed_scaling 和 (0,1] 校验。
+hardware/agent_geometry.py：抓取终点预规划、最后接近和夹住后的初次抬升，使用 min(当前速度, grasp_contact_speed_scaling)；finally 恢复速度。到预抓取点的移动使用常规速度。
+未修改轨迹规划算法、碰撞检查、停止/取消、健康监控或外部 ROS 控制器。
+
+实际控制含义
+现有 real_ptp.py/check_trajectory 将关节速度上限设为 0.5*speed rad/s，加速度上限 1.0*speed rad/s²，jerk 上限 5.0 rad/s³。
+常规速度上限由 0.10 -> 0.25 rad/s，加速度由 0.20 -> 0.50 rad/s²；不是 FR3 额定最高速度的直接百分比。
+每段至少 3 秒，以及启停/规划等待仍生效；不能从比例推断总耗时改善。
+提高持物搬运速度可能改变滑移情况，真机效果与耗时尚未验证。
+
+实验启动
+退出并重新启动 Agent。旧命令若有 --arm-speed 0.20 或 0.05，将其改为 --arm-speed 0.50，或删除覆盖项读取 YAML。
+建议使用新 trial 名，并显式区分实验标签：
+ARMCODE_TIMING_EXPERIMENT=fr3_two_object_speed050_v1 bash scripts/run_fr3_timing_trial.sh fast01 --arm-speed 0.50 --execute_robot
+此命令由操作者在场景准备好后执行；本次未执行。
+计时记录包含 hardware_profile/hardware_sha256，汇总按硬件与实现签名分组。
+
+验证
+新增 11 项离线测试覆盖快搬运/慢接触、低速覆盖、规划和执行异常后的速度/guard 恢复、无效配置拒绝。
+相关回归共 106 项通过（首轮新 mock 定义错误，修正后 11 项新增测试重跑通过；其余 95 项通过）。
+机械臂/夹爪全部为模拟或 mock；没有真机规划或运动验证。
+备份：runs/fr3_speed_update/20261111/before
+
+后续按用户明确要求：四项速度比例统一设为 0.60，覆盖常规搬运、抓取最后接近/初次抬升、放置下降和撤离。此前 0.50/0.20/0.03/0.15 为历史配置。放置不再有单独低速下降。启动命令如有 --arm-speed 请同步改为 0.60；其余轨迹校验、3 秒最短段时长和停止机制保留。配置与各阶段 min 限速已离线核对；未执行真机运动。

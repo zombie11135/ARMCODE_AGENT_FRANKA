@@ -1,0 +1,104 @@
+本地 VLM 部署与比较
+=================
+
+目标：用单张 24GB GPU 为规划、单步清障恢复和视觉校验提供统一的本地服务。
+模型和感知服务可以同时驻留；来自同一个 Agent 进程的本地 VLM 请求、SAM3 提议、
+AnyGrasp 规划通过现有 GPU 锁协调推理。模型权重保持常驻，跨进程调用前另释放空闲缓存。
+该锁无法协调其他终端/其他进程自行发起的推理，因此共存峰值仍需单独验证。
+
+一、模型与环境
+
+runtime/local_vlm.py 固定了两套第三方量化发布的完整 revision：
+- qwen35-9b-awq：cyankiwi/Qwen3.5-9B-AWQ-4bit。
+- qwen3vl-8b-awq：cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit。
+它们使用 compressed-tensors 存储，服务端自动识别格式；不要强行指定旧 AWQ 存储后端。
+量化权重由第三方发布，不等同于 Qwen 官方原精度模型的评测结果。
+
+VLM 使用独立的 Python 3.11 环境 .venv-vlm-local，依赖见 requirements-vlm-local.txt。
+不要在现有机器人/感知环境中安装这些依赖或升级其 PyTorch/Transformers。
+安装所需的 uv、Python 3.11 和 NVIDIA 驱动需提前准备。仓库根目录运行：
+
+  export ARM_LOCAL_VLM_ROOT='/absolute/path/on/data-disk/models/local-vlm'
+  export ARM_LOCAL_VLM_CACHE='/absolute/path/on/data-disk/cache/armcode-vlm'
+
+  bash scripts/setup_local_vlm.sh
+
+可通过 ARM_LOCAL_VLM_BASE_PYTHON 指定已有的 Python 3.11 解释器，
+ARM_LOCAL_VLM_UV 指定 uv 可执行文件，UV_INDEX_URL 指定可访问的包索引。
+网络需要时可显式设置 HF_ENDPOINT；这两套公开权重的下载不发送 HF 登录凭据。
+下载可续传，完整分片到齐后才能启动服务。
+环境、权重、缓存和运行记录不进入 Git；两套模型不是同时加载进行比较。
+
+二、接入现有 Agent
+
+在已有 FR3 配置环境中，沿用原有任务参数，增加：
+
+  bash run_fr3_agent.sh --local_vlm qwen3vl-8b-awq [原有任务参数]
+
+也可以将 --local_vlm 替换为 qwen35-9b-awq。该选项会覆盖统一 API、规划、
+fallback、VDM 和遮挡校验的角色地址，避免旧环境变量把某个角色留在线上。
+默认服务地址 http://127.0.0.1:8010/v1，可用 --local_vlm_port 修改端口。
+无需真实 API Key。只有已准备环境/模型时才能启动，帮助命令不会加载模型或设备。
+CLI 会自动启动或复用对应的本地服务；服务可跨 Agent 会话保留，避免反复加载。
+端口上已有不同模型时需先停止它，不能通过覆盖角色名字假装完成模型切换。
+
+如希望原启动命令默认使用本地服务，在被 Git 忽略的 config/local.env 中设置：
+
+  export ARM_AGENT_LOCAL_VLM='qwen3vl-8b-awq'
+  export ARM_LOCAL_VLM_ROOT='/absolute/path/on/data-disk/models/local-vlm'
+  export ARM_LOCAL_VLM_CACHE='/absolute/path/on/data-disk/cache/armcode-vlm'
+
+保留的线上 API 配置不会被删除；--no_local_vlm 可在单次启动中使用原 API 配置。
+
+使用独立服务终端或查询/停止自动启动的服务：
+
+  .venv-vlm-local/bin/python -m runtime.local_vlm serve --model qwen3vl-8b-awq
+  python -m runtime.local_vlm status
+  python -m runtime.local_vlm stop
+
+serve 为前台服务，可用 Ctrl+C 停止；stop 用于本工具记录的后台服务。
+停止请求后等待旧进程退出再启动另一模型。服务只监听本机回环地址。
+
+三、推理约束
+
+8B 的默认显存预算比例为 0.38，9B 为 0.45；最大上下文 8192、并发请求 1、最多四张图、无视频。
+正式模型比较显式使用相同比例 0.45；生产部署为 AnyGrasp 留出更多空间。
+单次 prefill token 批量上限 2048，长输入分块处理，以控制临时张量峰值。
+图像像素预算 524288，仅影响 VLM 输入预处理，不改变 SAM3/抓取使用的原始 RGB-D。
+先使用 eager 执行以减少 CUDA Graph 的启动和显存开销；显存比例不是 GPU 硬隔离。
+调用独立的 AnyGrasp/本地 VLM 进程前，在 GPU 锁内释放父进程未使用的 PyTorch 显存缓存。
+这不会卸载模型或释放仍有引用的张量，用于避免空闲缓存阻塞另一个进程分配显存。
+本地客户端对两套注册模型关闭 thinking，让有限输出预算用于最终 JSON。
+这也避免把思考文本误交给现有规划/恢复 JSON 解析器。
+本地规划使用 {"actions":[{"op":"grasp","target":"..."},...]}，
+任务图节点和边由程序构造；非本地服务仍保留原任务图输出协议。
+本地清障恢复输出菜单整数序号和简短理由，宿主按本次冻结快照绑定完整动作 ID 和
+snapshot_id，再经过原校验器。模型不再逐字复制长哈希，不能凭序号生成菜单外动作。
+在线 bbox 分割与遮挡提议通过 services/sam3_model_pool.py 共享同配置的 SAM3 权重；
+各自保留独立处理器和图像状态，整个模型操作仍通过同一个 GPU 锁串行协调。
+
+四、保存场景对比，不操作硬件
+
+  source config/local.env
+  "$FR3_AGENT_PYTHON" -m runtime.vlm_benchmark \
+    --output runs/local_vlm/comparison-new \
+    --visual-manifest runs/local_vlm/visual_cases.json
+
+比较器依次启动两模型，在两次运行间释放其进程显存。默认端口需未被占用。
+visual_cases.json 是本机评价输入，不随仓库提供；每项包含 case_id、image_path、
+image_sha256、prompt、expected（人工复核的 JSON 字段）。修改图片会使校验失败。
+没有图片清单时仅比较规划与保存的清障决策快照。
+历史快照默认来自 runs/current_capture/occlusion_recovery_llm，
+也可用 --recovery-dir 指定。旧快照的动作菜单按保存状态回放，不冒充重新运行最新几何。
+--include-remote 会额外请求当前统一 API；远端不可用时不能报告线上/线下加速比。
+
+输出 cases.json、逐请求 records.jsonl、每模型 summary.json 和 comparison.json。
+记录原始响应、严格 JSON 比例、策略规则符合程度、HTTP/完整调用耗时、token 数和显存采样峰值。
+文字及图片各热身一次，冷启动独立记录，不混入热请求时延；失败请求仍计入结果。
+原始计划按目标/容器映射计分，不用框架的启发式回退掩盖模型错误。
+历史恢复动作的一致率不是正确率；合法菜单选择和提示词偏好符合程度也不是任务成功率。
+图片标签只评价保存图片中的可见证据，不证明真实抓取安全或机械臂任务完成。
+显存指标是每 250ms 采样的整卡占用，可能漏掉极短峰值；模型共存还需离线 RGB-D 推理验证。
+
+相关源码：runtime/local_vlm.py、runtime/vlm_benchmark.py、app/cli.py、
+services/openai_chatgpt_vlm_client.py、agents/occlusion_recovery_planner.py。

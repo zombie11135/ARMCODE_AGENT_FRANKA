@@ -63,6 +63,25 @@ def test_credential_blocks_export_without_printing_value(tmp_path):
     assert not destination.exists()
 
 
+def test_export_keeps_simulation_sources_without_local_runtime_assets(tmp_path):
+    root = tmp_path / "workspace"
+    sources = ("simulation/__init__.py", "simulation/pmir/experiment.py",
+               "simulation/robosuite_backend/backend.py",
+               "simulation/robosuite_backend/README.md",
+               "config/simulation/robosuite_panda.json", "run_offline_check.sh",
+               "requirements-robosuite-backend.txt")
+    excluded = ("simulation/runs/events.json", "simulation/models/policy.pt",
+                "simulation/__pycache__/backend.pyc",
+                "config/simulation/robot.local.json",
+                "config/simulation/private_state.json", "config/hardware/fr3.yaml")
+    for name in sources + excluded:
+        write(root, name)
+    destination = tmp_path / "release"
+    assert export(root, destination) == len(sources)
+    assert all((destination / name).is_file() for name in sources)
+    assert all(not (destination / name).exists() for name in excluded)
+
+
 def test_export_includes_experiment_sources_and_reports(tmp_path):
     root = tmp_path / "workspace"
     sources = ("test_gripper_contact.sh", "skill_lab/test_segment_obj",

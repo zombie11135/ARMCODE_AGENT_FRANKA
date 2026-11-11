@@ -1,5 +1,6 @@
 """GSNet implementation of the legacy grasp service contract, isolated in a child process."""
 import json
+import os
 import hashlib
 from collections import OrderedDict
 from copy import deepcopy
@@ -9,7 +10,8 @@ import sys
 import uuid
 
 import numpy as np
-from runtime.perception_pipeline import serialized_resource
+from runtime.perception_pipeline import serialized_resource, release_idle_gpu_cache
+from runtime.timing import timed_stage
 
 from hardware.agent_geometry import capture_pose
 from hardware.config import load_config, PROJECT_ROOT
@@ -49,9 +51,11 @@ class GSNetService:
         return {'gsnet_root': str(root), 'checkpoint': str(root / 'checkpoints/graspness_realsense.tar')}
 
     def _run_inference(self, request_path, log):
-        subprocess.run([sys.executable, str(PROJECT_ROOT / 'hardware/gsnet_worker.py'), str(request_path)],
+        subprocess.run([os.environ.get("GSNET_PICK_PYTHON") or sys.executable,
+                        str(PROJECT_ROOT / 'hardware/gsnet_worker.py'), str(request_path)],
                        check=True, timeout=180, stdout=log, stderr=subprocess.STDOUT)
 
+    @timed_stage('抓取候选服务')
     @serialized_resource('gpu')
     def plan_grasp(self, *, color_path, intrinsics, capture_geometry=None,
                    points_path=None, mask_path=None, mask_npy_path=None, bbox=None,
@@ -134,6 +138,7 @@ class GSNetService:
             return result
         with (root / 'inference.log').open('w') as log:
             try:
+                release_idle_gpu_cache()
                 self._run_inference(request_path, log)
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                 raise RuntimeError(f'{self.backend} 推理进程失败，详情：{root / "inference.log"}') from error
@@ -185,8 +190,10 @@ class GSNetService:
         (root / 'targets.json').write_text(json.dumps({**plan['geometry'], 'selected': plan['selected'],
             'workcell': plan['workcell'], 'calibration': self.transforms.summary()}, indent=2))
 
+    @timed_stage('抓取位姿预览窗口等待')
     def visualize_last_grasps_by_indices(self, indices, window_name=None):
         if list(indices) != [0] or self.last_run is None:
             raise ValueError('GSNet exposes one selected grasp, index 0')
-        subprocess.run([sys.executable, '-m', 'hardware.gsnet_o3d', str(self.last_run)],
+        subprocess.run([os.environ.get("GSNET_PICK_PYTHON") or sys.executable,
+                        '-m', 'hardware.gsnet_o3d', str(self.last_run)],
                        cwd=PROJECT_ROOT, check=True)

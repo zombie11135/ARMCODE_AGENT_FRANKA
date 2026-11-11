@@ -1,0 +1,43 @@
+2026-11-11：GraspNet 爪指插入目标的筛选修复
+
+问题与证据
+原检测器用两根爪指、掌部、8 cm 接近区域的总体积归一化碰撞占用，可能稀释局部爪指碰撞。
+同帧旧候选 13 的 global_iou=0.0058685（通过旧 0.01 阈值），left_finger_iou=0.1041667。
+目标局部截面越过左爪内边界约 2.84 mm（2 mm 体素采样、2%/98% 分位范围）。
+
+实现
+hardware/graspnet_target_contact.py：
+- 每根爪指独立检查：占用指标超过 0.03 则拒绝；沿用上游检测器的近似夹爪和 5 mm 碰撞体素。
+- SAM 内目标点反投影关联，保留桌面上方 8 mm 以上点，每个 2 mm 体素取一个观测点。
+- 变换到候选局部坐标，截取爪指 X/Z 接触带，Y 为闭合方向。
+- 该截面至少 12 个观测点，使用 2%/98% 分位边界；两侧均须位于开口以内并有 2 mm 余量，目标须跨越夹持中心。
+- 使用局部截面，不要求整个药盒长轴都位于爪间；不补全凸包、不生成新姿态。
+- 没有 SAM 时只运行逐爪指检查，并明确记录 target_check_enabled=false。
+
+hardware/graspnet_worker_common.py：
+- 保留原全场景碰撞/空抓筛选，再接入上述检查，然后进入原基座姿态/桌面间隙筛选。
+- 两种 GraspNet 格式后端（baseline、GSNet）共享此路径；AnyGrasp 独立路径不受影响。
+- 每轮导出 pre_contact_candidates.npy、contact_filter.json 和两个新增筛选计数。
+- 不改模型参数、宽度解码、原始分数、排序、标定、MoveIt 或运动控制；无候选时不放宽条件。
+
+验证
+9 项新增接触几何测试：单爪碰撞被总体积稀释、侧面缺失、超宽、局部截面、偏心/观测不足、坐标变换、噪点、目标提取、无掩膜与空候选。
+合计 80 项相关测试通过。旧预览测试原本写死 640x480，现按配置检查全幅 ROI，兼容当前 1280x720。
+同帧完整 GPU 推理的原始数组逐元素与旧结果相同。
+235 -> 233 宽度分数 -> 47 ROI -> 45 SAM/桌面高度 -> 34 原碰撞/空抓 -> 11 逐爪指 -> 11 目标截面 -> 1 基座姿态/工具桌面间隙合格。
+本帧目标截面检查没有在逐爪指筛选之后额外减少候选；它独立拒绝旧候选 13，并由合成缺面场景测试覆盖。
+选中旧池候选 20（新池索引 6）；原始分 0.2108；两爪碰撞占用均 0；截面左右净空 8.73/10.93 mm。
+这只说明修复了本帧的可观测几何筛选问题，不代表已验证真实夹持成功或不可见表面无碰撞。
+未连接设备、未发运动、未执行 MoveIt 可达性验证。
+
+输出与复现
+runs/graspnet_contact_filter/20261111/replay/comparison.json
+runs/graspnet_contact_filter/20261111/replay/graspnet_baseline/contact_filter.json
+旧文件备份：runs/graspnet_contact_filter/20261111/before
+
+原生 O3D：
+cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+/home/wpy/armcode-runtime/agent/bin/python -m hardware.graspnet_baseline_worker --view runs/graspnet_contact_filter/20261111/replay --stage selected
+将 selected 改为 filtered 查看 11 个通过新点云筛选的候选；raw 为未筛选的原始候选。
+三个阶段均已验证原生几何可加载，没有添加可视化叠加内容。
+重启正在运行的 Agent，开始新任务以避免沿用此前服务内存中的抓取缓存。

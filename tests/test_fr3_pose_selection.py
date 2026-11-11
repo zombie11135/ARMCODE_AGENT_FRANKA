@@ -42,6 +42,20 @@ class PoseSelectionTests(unittest.TestCase):
     def plan(self, candidates, **options):
         return grasp_plan(self.source, self.result(candidates), self.transforms, self.workcell, **options)
 
+    def test_table_envelope_rejects_high_score_and_selects_clear_candidate(self):
+        self.workcell['grasp_table_clearance_check'] = True
+        self.workcell['table_z_m'] = 0.
+        self.workcell['table_clearance_m'] = 0.
+        colliding = self.candidate(0, .99, z=.15)
+        clear = self.candidate(1, .5, z=.45)
+        plan = self.plan([colliding, clear])
+        self.assertEqual(plan['selected']['source_candidate_index'], 1)
+        rejected = plan['pose_selection']['candidates'][0]
+        self.assertFalse(rejected['tool_above_table'])
+        self.assertFalse(rejected['accepted'])
+        with self.assertRaises(GraspSelectionError):
+            self.plan([colliding])
+
     def test_lower_raw_score_can_win_on_base_flange_tilt(self):
         tilted = self.candidate(0, .95, tilt=.4)
         flat = self.candidate(1, .8)

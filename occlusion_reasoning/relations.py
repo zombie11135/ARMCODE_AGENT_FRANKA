@@ -178,6 +178,9 @@ def _pair_evidence(index, a, b, mask_count, config):
         return result
     if max(positive, negative) < config.min_order_fraction:
         result["status"] = "no_resolved_depth_step" if result["depth"]["tied_fraction"] >= config.min_order_fraction else "mixed_local_depth_order"
+        if result['status'] == 'mixed_local_depth_order':
+            from .collective import local_depth_regions
+            result['local_regions'] = local_depth_regions(ya, yb, za, zb, (a, b), config)
         return result
 
     front, back = (a, b) if positive > negative else (b, a)
@@ -254,11 +257,17 @@ def extract_relations(packet: dict, arrays, config: RelationConfig | None = None
                                      valid & (count == 1), config.depth_patch_radius_px) if len(node["boundary"]) else np.array([])
     pairs = [_pair_evidence(i, a, b, count, config)
              for i, (a, b) in enumerate(combinations(nodes, 2))]
+    from .collective import add_collective_relations
+    from .structure import summarize_structure
+    collective = add_collective_relations(pairs, config)
     edges = [dict(edge, frame_id=frame["frame_id"]) for pair in pairs for edge in pair["edges"]]
+    structure = summarize_structure([node['id'] for node in nodes],
+        [edge for edge in edges if edge['relation'] == 'possible_occludes'])
     return {
         "schema": "single_frame_relations_v1",
         "frame_id": frame["frame_id"], "alignment_status": frame["rgb_depth_alignment"],
-        "config": asdict(config), "pairs": pairs,
+        "config": asdict(config), "pairs": pairs, "collective_occlusions": collective,
+        "occlusion_structure": structure,
         "relation_graph": {
             "status": "single_frame_evidence_and_hypotheses",
             "node_ids": [node["id"] for node in nodes], "edges": edges,

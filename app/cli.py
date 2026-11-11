@@ -386,7 +386,15 @@ def build_config(args, goal: str, executor_args):
             vlm_occlusion_temperature=args.vlm_occlusion_temperature,
             enable_occlusion_recovery=args.enable_occlusion_recovery,
             enable_geometry_occlusion=getattr(args, 'enable_geometry_occlusion', False),
+            enable_fragment_association=(getattr(args, 'enable_fragment_association', False)
+                                         and not getattr(args, 'disable_fragment_association', False)),
+            enable_vlm_fragment_assistance=(getattr(args, 'enable_vlm_fragment_assistance', False)
+                                            and not getattr(args, 'disable_vlm_fragment_assistance', False)),
             enable_perception_pipeline=not getattr(args, 'disable_perception_pipeline', False),
+            grasp_planning_retry_attempts=getattr(args, 'grasp_planning_retry_attempts', 1),
+            policy_backend=getattr(args, 'policy_backend', 'template'),
+            enable_policy_pipeline=not getattr(args, 'disable_policy_pipeline', False),
+            enable_active_perception=not getattr(args, 'disable_active_perception', False),
             geometry_occlusion_checkpoint=getattr(args, 'geometry_occlusion_checkpoint', ''),
             geometry_occlusion_auxiliary=not getattr(args, 'disable_geometry_occlusion_auxiliary', False),
             geometry_occlusion_buffer_poses_mmrad=getattr(args, 'geometry_occlusion_buffer_pose_mmrad', []),
@@ -601,6 +609,8 @@ def build_executor_args(args, raw_executor_args):
 
 
 def apply_unified_api_defaults(args):
+    from runtime.local_vlm import apply_local_endpoint
+    apply_local_endpoint(args)
     if args.api_base_url:
         args.vlm_base_url = args.vlm_base_url or args.api_base_url
         args.planner_llm_base_url = args.planner_llm_base_url or args.api_base_url
@@ -644,18 +654,28 @@ def run_goal(args, goal: str, executor_args) -> bool:
         print("replan_attempts:", result.replan_attempts)
         print("error:", result.error)
     else:
+        import json
+        pending = None
+        if not result.success and Path(result.failure_report_path).exists():
+            report = json.loads(Path(result.failure_report_path).read_text())
+            if report.get('evidence', {}).get('recovery_pending'):
+                pending = report
         print("\n=== 任务结果 ===")
         if args.no_run_executor and result.success:
             print("状态: 已生成执行脚本")
+        elif pending:
+            print("状态: 等待获取更多信息（目标任务尚未完成）")
         else:
             print("状态:", "完成" if result.success else "未完成")
         if result.replan_attempts:
             print("重规划次数:", result.replan_attempts)
         if not result.success:
-            print("失败报告:", result.failure_report_path)
+            print("决策记录:" if pending else "失败报告:", result.failure_report_path)
             if result.replan_md:
                 print("重规划结果:", result.replan_md)
-            print("原因:", result.error)
+            print("原因:", pending["error"] if pending else result.error)
+            if pending and pending["evidence"].get("information_plan_path"):
+                print("信息获取计划:", pending["evidence"]["information_plan_path"])
     return bool(result.success)
 
 
@@ -903,6 +923,21 @@ def main():
     parser.add_argument("--occlusion_recovery_max_attempts", type=int, default=1)
     parser.add_argument('--enable_geometry_occlusion', action='store_true',
                         help='接入腕部主/固定辅助的 RGB-D 关系图，在目标抓取前执行有界清障与重观测循环')
+    parser.add_argument('--policy_backend', choices=('template', 'cap', 'hybrid'), default='template',
+                        help='template=固定动作列表；cap=整体策略；hybrid=指令图子任务代码、局部恢复与预生成')
+    parser.add_argument('--enable_fragment_association', action='store_true',
+                        help='实验开关：启用碎片合并（完整模型掩膜和 SAM3 双向验证）；默认关闭')
+    parser.add_argument('--enable_vlm_fragment_assistance', action='store_true',
+                        help='实验开关：碎片关联启用时再使用 VLM 辅助；默认关闭')
+    parser.add_argument('--disable_vlm_fragment_assistance', action='store_true',
+                        help='关闭歧义碎片 VLM 辅助判断，保留 SAM3 与 RGB-D 关联作对照')
+    parser.add_argument('--disable_fragment_association', action='store_true',
+                        help='关闭完整模型掩膜合并、SAM3 双向关联和关联 VLM；保留深度分层与遮挡关系')
+    parser.add_argument('--disable_active_perception', action='store_true',
+                        help='关闭 hybrid 遮挡场景默认的信息获取策略，保留原观察重试作为对照')
+    parser.add_argument('--disable_policy_pipeline', action='store_true', help='关闭 hybrid 下一个子任务代码预生成，供串行对照')
+    parser.add_argument('--grasp_planning_retry_attempts', type=int, choices=(0, 1, 2), default=1,
+                        help='抓取规划无候选时重新观察的最大次数；不会自动重试硬件异常')
     parser.add_argument('--disable_perception_pipeline', action='store_true',
                         help='关闭首帧后台分析/候选预计算，使用原串行调度以便对比')
     parser.add_argument('--geometry_occlusion_checkpoint', default='', help='SAM3 sam3.pt，默认采用硬件配置目录')
@@ -971,6 +1006,12 @@ def main():
         default=os.getenv("ARM_AGENT_API_BASE_URL", os.getenv("PLANNER_API_BASE_URL", "")),
         help="统一的 VLM/LLM API base url，planner 和执行验证器默认共用这一项。",
     )
+    parser.add_argument('--local_vlm', choices=('qwen35-9b-awq', 'qwen3vl-8b-awq'),
+                        default=os.getenv('ARM_AGENT_LOCAL_VLM') or None,
+                        help='使用已准备的本地 VLM；覆盖所有角色的远端地址并自动启动本地服务。')
+    parser.add_argument('--local_vlm_port', type=int, default=8010)
+    parser.add_argument('--no_local_vlm', dest='local_vlm', action='store_const', const=None,
+                        default=argparse.SUPPRESS, help='本次使用原有 API 配置，不启用本地模型模式。')
     parser.add_argument(
         "--api_key",
         default=os.getenv("ARM_AGENT_API_KEY", os.getenv("PLANNER_API_KEY", "")),
@@ -1101,6 +1142,10 @@ def main():
     if args.visualize_selected_grasp is None:
         args.visualize_selected_grasp = bool(args.hardware_config)
     apply_unified_api_defaults(args)
+    if args.local_vlm:
+        from runtime.local_vlm import start_server
+        print(f'[local VLM] preparing {args.local_vlm} on 127.0.0.1:{args.local_vlm_port}', flush=True)
+        start_server(args.local_vlm, port=args.local_vlm_port)
 
     executor_args = list(args.executor_args or [])
     if executor_args and executor_args[0] == "--":

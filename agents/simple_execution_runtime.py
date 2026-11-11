@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.actions import SimpleAction
+from runtime.timing import timed_stage, timed_task, timing_stage, record_hardware_profile
 # Keep the old camera-wrapper import path available to callers.
 from runtime.camera import TaskCachedCamera as TaskCachedCamera
 from runtime.services import build_camera, build_execution_context
@@ -36,7 +37,13 @@ class SimpleExecutionRuntime:
         self.config = config
         self.replan_attempts = 0
         self.replan_paths = {}
+        from runtime.task_state import TaskRunState
+        self.task_state = TaskRunState(getattr(config, 'goal', ''), Path(getattr(config, 'plan_json', getattr(config, 'simple_memory_path', 'runs/current_plan/plan_graph.json'))).with_name('task_state.json'))
+        self.last_failure_report = None
+        self._active_context = None
 
+    @timed_task
+    @timed_stage('执行阶段')
     def run(self, actions: List[SimpleAction]) -> bool:
         if not actions:
             raise ValueError('规划没有可执行动作，未启动相机或机械臂执行会话。')
@@ -44,23 +51,35 @@ class SimpleExecutionRuntime:
         require_task_geometry(self.config)
         print("\n[executing] 使用简短技能执行")
         context, camera_service = self._build_execution_context()
+        self._active_context = context
         arm = None
         hardware = None
         perception_pipeline = None
+        robot = None
+        self._execution_checkpoint = dict(action=SimpleAction('initialize', 'hardware'),
+                                          index=None, completed=[], holding=None)
+        from hardware.fr3 import MotionError
+        from hardware.robotiq import GripperError
 
         try:
-            camera_service.start()
-            time.sleep(self.config.camera_warmup_s)
+            with timing_stage('相机启动与预热'):
+                camera_service.start()
+                time.sleep(self.config.camera_warmup_s)
 
             # Resolve all known names before opening an execution session or moving home.
+            source_actions = list(actions)
             actions = self._resolve_action_targets(context, actions)
 
             if getattr(self.config, "hardware_config_path", None):
                 from hardware.runtime import build_hardware
-                hardware = build_hardware(self.config.hardware_config_path,
-                    execute=self.config.execute_robot, agent=True,
-                    speed_scaling=getattr(self.config, "arm_speed_scaling", None))
-                hardware.attach(context, monitor_gripper=(self.config.execute_robot and not self.config.disable_grip))
+                with timing_stage('硬件会话初始化') as timing:
+                    hardware = build_hardware(self.config.hardware_config_path,
+                        execute=self.config.execute_robot, agent=True,
+                        speed_scaling=getattr(self.config, "arm_speed_scaling", None))
+                    record_hardware_profile(hardware.config)
+                    hardware.attach(context, monitor_gripper=(self.config.execute_robot and not self.config.disable_grip))
+                    timing['arm_speed_scaling'] = hardware.arm.config.speed_scaling
+                print('[FR3] arm.speed_scaling='+str(hardware.arm.config.speed_scaling))
                 if self.config.execute_robot and not self.config.disable_grip:
                     session = hardware.gripper.session_info()
                     print('[FR3] 夹爪通信:', session.get('communication_mode', 'thread'),
@@ -99,12 +118,23 @@ class SimpleExecutionRuntime:
             if perception_pipeline is not None:
                 perception_pipeline.publish()
 
+            if getattr(self.config, 'policy_backend', 'template') == 'hybrid':
+                from agents.hybrid_execution import HybridTaskRunner, policy_client
+                from runtime.services import build_planner_context
+                return HybridTaskRunner(self, robot, context, camera_service, source_actions, actions,
+                    policy_client(build_planner_context(self.config))).run()
+            if getattr(self.config, 'policy_backend', 'template') == 'cap':
+                from agents.cap_execution import run_policy
+                return run_policy(self, robot, context, camera_service, source_actions, actions)
             return self._run_actions(
                 robot=robot,
                 context=context,
                 camera_service=camera_service,
                 actions=actions,
             )
+        except (MotionError, GripperError) as error:
+            self._record_hardware_failure(error, context, robot)
+            return False
         finally:
             if perception_pipeline is not None:
                 perception_pipeline.close()
@@ -120,7 +150,8 @@ class SimpleExecutionRuntime:
                         if state is not None and hardware.gripper.may_be_holding_object():
                             from hardware.gsnet_pick import hold_console
                             print("[FR3] 夹爪有接触记录，可能仍夹持物体；保持通信，使用 open 释放或 quit 退出。")
-                            hold_console(hardware.gripper, lambda event, **data: print(event, data))
+                            with timing_stage('故障后人工夹爪会话等待'):
+                                hold_console(hardware.gripper, lambda event, **data: print(event, data))
                 finally:
                     hardware.disconnect()
             if arm is not None:
@@ -129,6 +160,29 @@ class SimpleExecutionRuntime:
                 except Exception:
                     pass
 
+    def _record_hardware_failure(self, error, context, robot):
+        from hardware.fr3 import MotionError
+        checkpoint = self._execution_checkpoint
+        progress = dict(getattr(context, 'manipulation_progress', {}) or {})
+        failure_type = 'motion_error' if isinstance(error, MotionError) else 'gripper_error'
+        if isinstance(error, MotionError) and progress.get('stage') == 'precheck':
+            failure_type = 'grasp_endpoint_precheck_failed'
+        evidence = dict(automatic_replan=False,
+            recovery_action='inspect_hardware_and_holding_state',
+            hardware_error_type=type(error).__name__,
+            hardware_result=self._safe_json(getattr(error, 'result', None)),
+            manipulation_progress=progress,
+            holding_state=progress.get('holding_state', 'unknown'),
+            current_grasp=checkpoint['holding'],
+            completed_actions_are_not_safe_to_replay=True)
+        self._write_failure_report(checkpoint['action'], checkpoint['holding'], failure_type,
+            str(error), evidence=evidence, failed_action_index=checkpoint['index'],
+            completed_actions=checkpoint['completed'])
+        if robot is not None:
+            self._save_memory(robot, completed_actions=checkpoint['completed'])
+        print(f'[recovery] {failure_type}: 已保存进度；停止自动重试。{error}')
+
+    @timed_stage('目标名称解析')
     def _resolve_action_targets(self, context, actions):
         from services.object_names import ObjectNameResolver, NameResolutionRequired, normalize_name
         from services.object_reference_service import atomic_json
@@ -224,6 +278,10 @@ class SimpleExecutionRuntime:
                 )
                 gripper_close = lambda: self._call_grip_service(self.config.grip_close_value)
 
+        if gripper_open is not None:
+            gripper_open = timed_stage('夹爪张开')(gripper_open)
+        if gripper_close is not None:
+            gripper_close = timed_stage('夹爪闭合')(gripper_close)
         return SimpleRobotActions(
             context=context,
             config=SimpleRobotConfig(
@@ -421,6 +479,7 @@ class SimpleExecutionRuntime:
             gripper_close=gripper_close,
         )
 
+    @timed_stage('任务首帧拍摄')
     def _capture_task_home_view(self, context, camera_service):
         from runtime.observation_memory import invalidate_camera
         invalidate_camera(camera_service, 'new_task')
@@ -434,6 +493,7 @@ class SimpleExecutionRuntime:
             )
         return {'wrist': task_wrist, 'global': task_global}
 
+    @timed_stage('容器预观测总计')
     def _preobserve_containers(self, robot, camera, actions: List[SimpleAction]) -> bool:
         print("[executing] 预观测所有目标容器。")
         if isinstance(camera, TaskCachedCamera):
@@ -514,12 +574,17 @@ class SimpleExecutionRuntime:
     def _run_actions(self, robot, context, camera_service, actions: List[SimpleAction],
                      *, completed_actions=None, start_index=0) -> bool:
         from services.object_names import display_name
+        self._active_context = context
         current_grasp: Optional[str] = None
         completed_actions = list(completed_actions or [])
         last_gated_result: Optional[float] = None
         total_steps = max(1, len(actions))
         for index, action in enumerate(actions[start_index:], start=start_index + 1):
             print(f"[executing] {index}/{len(actions)} {action.op}({display_name(context, action.target)})")
+            self._execution_checkpoint = dict(action=action, index=index - 1,
+                completed=list(completed_actions), holding=current_grasp)
+            context.manipulation_progress = {}
+            self.task_state.begin(action, completed_actions)
             gate_blocked = False
 
             if action.op in {"observe", "grasp", "place"}:
@@ -554,7 +619,9 @@ class SimpleExecutionRuntime:
                         },
                     )
             elif action.op == "grasp":
-                result = self._grasp_with_cache_retry(robot, context.camera, action.target)
+                result = self._refresh_stack_surface(robot, actions, index - 1)
+                if result is None or result.success:
+                    result = self._grasp_with_cache_retry(robot, context.camera, action.target)
                 if result.success:
                     current_grasp = action.target
             elif action.op == "place":
@@ -576,31 +643,9 @@ class SimpleExecutionRuntime:
                 if action.op == "grasp":
                     failure_medicine_query = action.target
                 failure_type = (result.data or {}).get("failure_type") or self._failure_type_for_action(action)
-                if action.op == "place" and not str(failure_type).startswith("nesyro_gate"):
-                    home_result = self._home_after_place(robot)
-                    if not home_result.success:
-                        self._log_gate_outcome_for_action(
-                            robot=robot,
-                            actions=actions,
-                            action=action,
-                            completed_actions=completed_actions,
-                            primitive_success=False,
-                            execution_failure_type="return_home_failed",
-                        )
-                        self._write_failure_report(
-                            failed_action=SimpleAction(op="home", target="after_failed_place"),
-                            medicine_query=failure_medicine_query,
-                            failure_type="return_home_failed",
-                            error=home_result.error,
-                            failed_action_index=index - 1,
-                            completed_actions=completed_actions,
-                            evidence={
-                                "home": home_result.data,
-                                "original_place_error": result.error,
-                                "original_place_data": result.data,
-                            },
-                        )
-                        return False
+                if action.op == "place":
+                    result.data = dict(result.data or {}, automatic_replan=False,
+                                       recovery_action='inspect_placement_before_resuming')
                 self._log_gate_outcome_for_action(
                     robot=robot,
                     actions=actions,
@@ -619,7 +664,8 @@ class SimpleExecutionRuntime:
                     evidence=result.data,
                 )
                 self._save_memory(robot, completed_actions=completed_actions)
-                if gate_blocked and action.op == 'grasp' and current_grasp is None:
+                if (gate_blocked and action.op == 'grasp' and current_grasp is None
+                        and getattr(self.config, 'policy_backend', 'template') == 'template'):
                     from agents.same_session_replanning import repair_gate_before_grasp
                     try:
                         repaired = repair_gate_before_grasp(
@@ -636,6 +682,7 @@ class SimpleExecutionRuntime:
                 last_gated_result = 1.0
             self._print_action_bbox_summary(action, result.data or {})
             completed_actions.append(self._action_to_dict(action))
+            self.task_state.complete(action, completed_actions)
             self._log_gate_outcome_for_action(
                 robot=robot,
                 actions=actions,
@@ -945,16 +992,64 @@ class SimpleExecutionRuntime:
             return self._safe_json(value.tolist())
         return str(value)
 
+    def _refresh_stack_surface(self, robot, actions, index):
+        arm = getattr(robot.context, 'arm', None)
+        if getattr(getattr(arm, 'config', None), 'place_height_mode', 'fixed') != 'stack_rgbd':
+            return None
+        target = SimpleRobotActions._next_place_target(actions, index)
+        if not target:
+            return self._skill_failure(actions[index], 'Stack placement needs a destination before grasp',
+                                       data={'automatic_replan': False})
+        robot._invalidate_container_cache(target)
+        observed = robot.observe_container(target)
+        if not observed.success:
+            observed.data = dict(observed.data or {}, automatic_replan=False,
+                                 failure_type='stack_surface_unverified')
+            return observed
+        if self.config.execute_robot:
+            home = robot.home()
+            if not home.success:
+                home.data = dict(home.data or {}, automatic_replan=False,
+                                 failure_type='return_home_failed')
+                return home
+        return observed
+
+    @timed_stage('抓取流程', detail=lambda self, robot, camera, target: target)
     def _grasp_with_cache_retry(self, robot, camera, target: str):
         if isinstance(camera, TaskCachedCamera):
             camera.disable_cache()
 
-        result = robot.grasp(target)
-
+        hybrid = getattr(self.config, 'policy_backend', 'template') == 'hybrid'
+        attempts = 0 if hybrid else getattr(self.config, 'grasp_planning_retry_attempts', 1)
+        if type(attempts) is not int or not 0 <= attempts <= 2:
+            raise ValueError('grasp_planning_retry_attempts must be 0, 1 or 2')
+        history = []
+        for attempt in range(attempts + 1):
+            with timing_stage('抓取规划重试' if attempt else '抓取首轮尝试', detail=target) as timing:
+                timing['attempt'] = attempt
+                result = robot.grasp(target)
+                timing['status'] = 'ok' if result.success else 'failed'
+            history.append(dict(attempt=attempt, success=result.success, error=result.error,
+                                failure_type=(result.data or {}).get('failure_type')))
+            if (result.success or attempt == attempts or
+                    (result.data or {}).get('failure_type') != 'grasp_pose_not_found'):
+                break
+            from runtime.observation_memory import invalidate_camera
+            invalidate_camera(camera, 'grasp_planning_retry', discard_scene=False)
+            robot.observations.pop(target, None)
+            if isinstance(camera, TaskCachedCamera):
+                camera.disable_cache()
+            print(f'[recovery] 抓取规划无候选，重新拍摄/识别 {attempt + 1}/{attempts}')
+        result.data = dict(result.data or {}, grasp_planning_recovery=history)
+        if not hybrid and not result.success and (result.data or {}).get('failure_type') == 'grasp_pose_not_found':
+            # Do not multiply this bounded budget via an outer whole-task retry.
+            result.data.update(automatic_replan=False, recovery_action='inspect_grasp_candidates')
         if isinstance(camera, TaskCachedCamera):
             camera.disable_cache()
         return result
 
+    @timed_stage('放置与验证流程', detail=lambda self, robot, context, camera_service, action, current_grasp, step_index:
+                 f'{current_grasp} -> {action.target} (step {step_index})')
     def _place_and_verify(self, robot, context, camera_service, action, current_grasp, step_index):
         from services.object_names import display_name
         before = self._capture_verify_pair(camera_service)
@@ -992,6 +1087,7 @@ class SimpleExecutionRuntime:
             print(f"[executing][WARN] 回 home 失败：{result.error}")
         return result
 
+    @timed_stage('执行服务加载')
     def _build_execution_context(self):
         return build_execution_context(
             self.config, camera=self._build_camera(), event_callback=self._event_callback
@@ -1000,6 +1096,7 @@ class SimpleExecutionRuntime:
     def _build_camera(self):
         return build_camera(self.config)[0]
 
+    @timed_stage('放置结果验证检查')
     def _verify_place_if_needed(self, context, camera_service, before_pair, medicine_query, container, step_index) -> bool:
         if not self.config.verify_place_vdm:
             return True
@@ -1071,6 +1168,12 @@ class SimpleExecutionRuntime:
             except Exception:
                 previous_report = None
         evidence = dict(evidence or {})
+        progress = dict(getattr(self._active_context, 'manipulation_progress', {}) or {})
+        evidence.setdefault('manipulation_progress', progress)
+        from runtime.task_state import recovery_decision
+        recovery = recovery_decision(failure_type, evidence['manipulation_progress'], failed_action.op)
+        if failure_type.startswith('nesyro_gate') and evidence.get('automatic_replan') is False:
+            recovery = dict(route='stop', reason='gate_requested_stop')
         if previous_report is not None:
             evidence["previous_failure_report"] = previous_report
         report = {
@@ -1087,11 +1190,19 @@ class SimpleExecutionRuntime:
             "automatic_replan": evidence.get('automatic_replan',
                                               not getattr(self.config, 'enable_geometry_occlusion', False)),
             "same_session_replan_attempts": self.replan_attempts,
+            "recovery": recovery,
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        print("[failure] 已生成失败报告。")
-        print(f"[failure] 报告路径：{path}")
+        from services.object_reference_service import atomic_json
+        self.last_failure_report = self._safe_json(report)
+        self.task_state.fail(self.last_failure_report)
+        atomic_json(path, self.last_failure_report)
+        if evidence.get('recovery_pending'):
+            print("[information] 等待新信息；已保存当前决策与未完成任务。")
+            print(f"[information] 决策记录：{path}")
+        else:
+            print("[failure] 已生成失败报告。")
+            print(f"[failure] 报告路径：{path}")
         return report
 
     @staticmethod

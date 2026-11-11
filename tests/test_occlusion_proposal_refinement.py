@@ -200,3 +200,19 @@ def test_tiled_windows_cover_the_image_with_overlap():
                                    {"internal_edge_margin_px":1.5}])
 def test_invalid_refinement_configuration(kwargs):
     with pytest.raises(ValueError): RefinementConfig(**kwargs)
+
+
+def test_large_mask_cannot_hide_a_small_crop_edge_object_from_recovery():
+    class SwallowingBackend(EdgeBlockBackend):
+        def predict(self, crop, prompts, min_mask_pixels):
+            rows, metadata = super().predict(crop, prompts, min_mask_pixels)
+            x, y = crop[..., 0], crop[..., 1]
+            for item in rows:
+                if item['source_id'] == 'box':
+                    item['mask'] = (x >= 20) & (x < 90) & (y >= 20) & (y < 80)
+            return rows, metadata
+    image = edge_block_image()
+    proposals, report, _ = refine_proposals(image, ['box'], SwallowingBackend())
+    block = (image[..., 0] >= 60) & (image[..., 0] < 78) & (image[..., 1] >= 35) & (image[..., 1] < 50)
+    assert any(np.array_equal(p['mask'], block) for p in proposals)
+    assert report['recovery_windows'] > 0

@@ -1,6 +1,7 @@
 """FR3/Robotiq wiring for the original agent and explicit legacy pose adapter."""
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+import time
 import warnings
 from contextlib import nullcontext
 from runtime.observation_memory import memory_for
@@ -62,6 +63,20 @@ class Hardware:
             state = self.gripper.assert_healthy(require_ready=False)
             if not state.activated:
                 self.gripper.activate()
+            else:
+                # gACT echoes the activation request, not its completion. After
+                # startup communication recovers, gSTA may still lag at 0/1.
+                # Allow bounded read-only settling; never reset an already
+                # activated gripper or clear a fault to make attachment pass.
+                deadline = time.monotonic() + self.config.gripper.startup_timeout_s
+                while (state.activated and state.activation_state in (0, 1)
+                       and state.fault == 0 and not state.go_to):
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(self.config.gripper.poll_interval_s, remaining))
+                    self.gripper.status()
+                    state = self.gripper.assert_healthy(require_ready=False)
             self.gripper.assert_healthy(require_ready=True)
         context.arm = self.arm
         context.gripper = self.gripper
@@ -115,6 +130,9 @@ def require_task_geometry(config):
         if cfg.perception.grasp_backend == "anygrasp":
             from services.anygrasp_fr3_service import validate_anygrasp_paths
             validate_anygrasp_paths(cfg.perception)
+        elif cfg.perception.grasp_backend == "graspnet_baseline":
+            from services.graspnet_baseline_service import validate_graspnet_paths
+            validate_graspnet_paths(cfg.perception)
         speed = getattr(config, "arm_speed_scaling", None)
         if speed is not None:
             FrankaMoveItArm(cfg.arm).set_speed_scaling(speed)

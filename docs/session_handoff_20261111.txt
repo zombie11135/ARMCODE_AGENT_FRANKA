@@ -1,0 +1,373 @@
+armcode-agent 项目交接：物理执行 Runtime 与流水线实验
+整理日期：2026-11-11（Asia/Shanghai）。主要近期实验完成于 2026-11-09～10。
+
+先读摘要
+研究目标已从“让 CaP 支持流水线”发展为 Physical Agent Execution Runtime：在物理不确定性、
+状态有效性和资源约束下，自动分析并调度 CaP 程序，缩短完整任务执行时间，保持成功率。
+已有 PMIR + 受限 AST 分析 + 基础调度 + robosuite 真实接触仿真，不要重新从零搭建。
+最新任务是“暂不增加新模块，先解释耗时，再做计算延迟控制变量实验”；这两项已完成。
+现有证据说明延迟足够大时流水线有收益，Dynamic 可以避免遮挡空观测，但尚未证明它稳定
+比 Naive 更快。后续先优化已测到的调度/采图/验证开销，再考虑复杂预测或恢复。
+本次交接只读核对并新增此文件，没有重跑实验、重新部署、启动服务或操作机器人。
+
+1. 工作约定与当前仓库
+
+活动 SSD 仓库：/home/wpy/projects/armcode-agent (1)/armcode-agent
+不要改到旧机械盘副本 /home/wpy/data/wpy/armcode-agent (1)。路径含空格和括号，shell 中需引用。
+分支：feat/occlusion-observation-scheduling
+HEAD：a01b3dbb2140d9c8ec251e92276f715be9099f3a
+工作树包含大量未提交修改和未跟踪文件；关键 PMIR、CaP/Hybrid、计时文件也有未跟踪项。
+HEAD 不是当前完整成果。禁止 reset --hard、clean、checkout HEAD 覆盖文件；不要自动提交。
+保留已有修改、数据和历史实验。新增实验必须使用不存在的输出目录，不覆盖或删除旧结果。
+
+用户明确偏好：
+- 以现有工程和实际瓶颈推进，暂时不增加新模块，不无限扩展架构讨论。
+- 不重新部署，不默认开启碎片关联/合并或 VLM 碎片辅助。
+- 严格区分离线逻辑测试、真实模型调用、接触物理仿真、真机效果。
+- 历史拍摄位姿、测试缓冲位、合成全零位姿均不能作为当前可执行硬件坐标。
+- 本轮仿真实验不构成新一轮 FR3 动作授权，也没有核实当前硬件或模型服务在线状态。
+- 能在授权范围内直接做的可逆工作继续做；不要重复征求已给出的授权。
+
+本次环境允许写 /home/wpy 与 /tmp。旧交接关于“仓库不在可写根目录”的描述已不适用于
+本会话；下一 agent 应以自己会话的实时权限配置为准，不能据此自行提升权限。
+
+2. 阅读顺序与运行环境
+
+优先读取：
+  本文件
+  simulation/pmir/README.md                  当前接口、运行方式、计时字段
+  docs/pmir_cost_sweep_20261110.txt           最新完整实验、数值和解释
+  docs/pmir_robosuite_20261110.txt            最初 PMIR 接触仿真实现及边界
+  docs/pipeline_optimization_20261109.txt     原感知/Hybrid 流水线核对及修复
+  docs/task_timing.txt                       生产计时机制
+按需再读：docs/session_handoff_20261109.txt；它保留 FR3、视觉、遮挡、恢复的详细历史，
+但其“尚无 PMIR/仿真实验”等时点结论应由后续报告更新，不要把不同实验混为一份结果。
+
+已有解释器（2026-11-11 确认路径存在，不需重新安装）：
+  .venv-robosuite/bin/python                 仿真实验、仿真测试
+  .venv-mobileclip2-fr3/bin/python           既有感知/生产离线测试、matplotlib 绘图
+  .venv-vlm-local/bin/python                 隔离模型环境，本轮未使用
+仿真实验记录的版本：Python 3.11.15、robosuite 1.5.2、MuJoCo 3.3.1、NumPy 2.2.5、SciPy 1.15.3。
+仿真环境不依赖 matplotlib；绘图用既有感知解释器，不为此改装环境。
+已有 simulation/robosuite_backend/rendering.py 负责无界面 EGL 选择；不要先重装驱动/依赖。
+正式计时使用 OPENBLAS_NUM_THREADS=1、OMP_NUM_THREADS=1。
+
+历史生产运行目录：/home/wpy/armcode-runtime；ROS 工作区在其 ros_ws 下。
+FR3 配置 config/hardware/fr3.yaml 当前 grasp_backend=graspnet_baseline。
+不要把用户有 AnyGrasp 经验理解成当前仿真已接 AnyGrasp 或当前硬件许可/服务已验证。
+
+3. 研究共识与实际实现必须区分
+
+设计方向：
+- 依赖分析器：CaP Python -> PMIR -> 动态依赖图 G_t=(V_t,E_t)。
+- PEIP + Memory：未来的分支预测、推测计算、结果缓存及有效性管理。
+- Recovery-Aware Runtime：资源调度、状态验证、提交及局部恢复。
+- 依赖分 data/control/physical；资源冲突是独立调度约束，不自动等同于因果依赖。
+- 用 R(u)、W(u) 描述读写状态；已确认且状态仍有效的事件可提前释放后续计算。
+- 只推测计算，不因预测而提前执行不可逆物理动作。
+- 优化实际任务完成时间，成功率、资源和安全作为约束；失败代价、验证和收尾也要计时。
+
+当前只实现最小可运行子集，尚未实现：
+  通用 PEIP 分支预测、PMIR CODE_GEN、新技能源码自动理解、通用物理影响范围推断、
+  通用缓存管理、最小失效子图自动恢复、抽屉或真实倒水技能。
+已有生产 Hybrid 的下一节点代码预生成，不等于上述 PMIR 框架已经实现通用分支预测。
+当前 Naive 的一次重采只是实验对照行为，不等于已完成局部错误恢复框架。
+不要将设计共识写成已经通过实验验证的完整 Runtime 能力。
+
+4. 原生产感知与 Hybrid 流水线：保留并复用
+
+A. runtime/task_perception_pipeline.py / TaskPerceptionPipeline
+冻结首帧后，单后台线程分析图像，并在条件满足时预计算抓取候选；前台执行容器预观察。
+发布时检查任务、epoch、采集位姿等；后台不持有相机、机械臂或夹爪，不执行物理动作。
+候选预计算不是每次都会发生；需要看 skip reason、候选命中和实际使用记录。
+
+B. agents/hybrid_execution.py / HybridTaskRunner
+执行当前节点时预生成下一节点代码，并绑定任务图 revision。修复后旧 revision 作废。
+2026-11-09 已修复：每次修复后的当前节点执行尝试也会重新启动下一节点预生成。
+保留已完成前缀，不重放它；已有恢复预算和状态约束不放宽。
+已增加 prefetch_jobs、join_wait、失效浪费、任务结束后未用工作、shutdown 等指标。
+Future.cancel() 不能中断已开始的 HTTP 请求，shutdown(wait=True) 可能形成尾部等待。
+这是一项已证实的机制风险，不是已经证明的当前真实模型瓶颈。
+
+C. runtime/perception_pipeline.py / ordered_bounded_map
+已修复工作线程 ContextVar 传播：每个任务复制独立上下文，使子阶段与资源锁等待能入账。
+未解除 GPU/OCR 资源锁，也没有改变有界线程数和有序发布。
+
+D. 生产入口与实验入口不同
+app/cli.py 默认 policy_backend 仍是 template；可选 cap/hybrid。
+--disable_perception_pipeline 和 --disable_policy_pipeline 可作对应生产消融。
+当前 PMIR 是独立仿真实验入口，未替换生产 CaP 解释器或接入 FR3 默认执行流程。
+
+2026-11-09 的 runtime/pipeline_benchmark.py 是复用正式执行路径的逻辑/人工延迟基准，
+并非接触物理仿真。其数据在 runs/experiments/pipeline_20261109/。
+真实模型模式曾尝试访问 localhost:8010/v1/models，被当时沙箱拒绝（Operation not permitted）。
+不能因此判断模型离线；也不能声称这些逻辑基准调用了真实模型。
+
+5. 当前 PMIR 与仿真实现：从这些文件接手
+
+runtime/pmir/graph.py
+  Node/Edge/Graph、带原因的依赖、DAG 校验、JSON/Mermaid 导出；resources 单独描述。
+  Graph.parents 目前逐次扫描边。调度遍历成本已测到，尚未做缓存/增量就绪优化。
+runtime/pmir/compiler.py
+  受限 AST，支持 observe/pick_place、局部字面量绑定、有限字面量循环、if [not] observe。
+  不支持任意 Python、属性/导入/递归、动态 range、分支内部提前 return；不调用 eval/exec。
+  技能结构/读写契约由注册描述提供，程序依赖由分析器实例化，不是自动理解任意技能实现。
+  显式 observe 保留程序位置；隐式准备允许前移；物理提交仍按源程序顺序。
+  可登记黑盒技能形成保守屏障；没有仿真 handler 时入口会拒绝实际运行。
+runtime/pmir/scheduler.py
+  单 CPU worker，主线程推进物理 generator；有 serial / naive / dynamic 三种模式。
+  保留依赖、资源、版本校验；未实现多个机械臂同时运动。
+  ForegroundCosts 在此文件内记录互斥前台区间，不是独立新架构模块。
+  失败/陈旧证据停止本轮、保留完成前缀并收尾后台；不物理回滚、不自动从头重做。
+simulation/pmir/adapter.py
+  复用既有 RobosuiteBackend。只有主线程调用 MuJoCo/EGL；worker 只得到只读图像快照。
+  物理操作真实通过控制器步进/接触完成，不通过写 qpos 冒充抓放。
+  相机、仿真状态监测和可见性事件均在 owner 线程；snapshot/probe/step 中已有细分计时。
+simulation/pmir/perception.py
+  已知颜色/尺寸/桌面高度的 RGB-D 方块几何估计，后台无物体/机器人真值输入。
+  可选每次 PERCEIVE 的 sleep 延迟；实际等待区间与处理时间分别记录。
+simulation/pmir/experiment.py
+  实验入口、源码归档、运行顺序、结果与配对统计、成本/关键等待计算。
+scripts/plot_pmir.py
+  从保存的数据生成依赖图、时间线、延迟曲线、成本堆积图和无效计算图；不会再执行任务。
+simulation/robosuite_backend/
+  用户已安装并提供的 Panda/MuJoCo 接触物理后端；最近计时扫描没有修改它。
+
+默认程序：
+  def policy():
+      pick_place("red_cube", "red_goal")
+      pick_place("blue_cube", "blue_goal")
+展开 28 个节点。每次抓放：CAPTURE、PERCEIVE、GRASP_PLAN、MOTION_PLAN，然后
+raise / approach / descend / close / lift / transport / lower / release / retreat / settle。
+close/release 为 GRIPPER，settle 为 VERIFY，其余物理阶段为 MOVE。
+GRASP_PLAN 是解析的固定竖直抓取；MOTION_PLAN 是名义笛卡尔路点，不是 AnyGrasp/MoveIt。
+
+明确依赖仿真真值的部分：物体速度/版本监视、双指接触、抬升检查、持物偏移、最终放置。
+目标位移超过 1.5 mm 或转动超过 0.04 rad 时递增版本；阈值不是已证明通用安全的物理模型。
+初始及 lift/release/settle 后采集图像并做可见性/稳定检查；掩膜 >=25 像素且稳定才放行。
+不能在 A 移开前为完全不可见的 B 编造抓取位姿。
+
+模式定义（必须保留公平口径）：
+  Serial：按节点顺序运行，同样承担状态监测和成功判据。
+  Naive：首次隐式 CAPTURE 不等待可见性门控；若生成空观测，丢弃结果，确认可见/稳定后
+         最多重采一次。物理顺序、版本检查仍保持；显式 observe 的 false 分支语义不改变。
+  Dynamic：首次隐式 CAPTURE 就等待已确认的可见/稳定事件，避免上述无效早算。
+Naive 是本实验明确规定的比较策略，不能泛称所有传统流水线。
+
+6. 最新实验：已完成，无需为了“建立基线”从零再做
+
+根目录：runs/experiments/pmir_cost_sweep_20261110/
+正式数据在其 sweep/ 下。
+两场景 independent / occluded × 5 延迟 × 3 模式 × 6 次重复 = 180 正式回合。
+另有 6 次最大延迟预热，排除于正式统计。固定 seed 7；每个条件块三种方法相邻执行，
+六轮使用三种方法的全部六种排列，每个方法在各运行位置出现两次，各轮打乱条件块顺序。
+计算延迟为每次 PERCEIVE 额外 0/50/100/200/500 ms；0 ms 仍执行真实几何处理。
+Serial/Dynamic 一轮各两次有效感知；遮挡 Naive 通常三次（含失败早算），每次都承担延迟。
+这是返回延迟控制，不模拟 CPU/GPU 饱和、GIL/显存争用或真实模型计算成本。
+
+180/180 完成，120/120 个 Serial 与候选的配对满足初态、动作顺序、成功和步数条件。
+每场景内所有模式/负载/重复的初始 qpos 和 RGB 哈希一致。
+independent 固定 773 控制步、38.65 s 仿真控制时间；occluded 固定 775 步、38.75 s。
+注意跨场景布局并不相同：独立布局为 seed 7 的轻微扰动，遮挡布局为固定对齐，相机也不同。
+因此不能将跨场景收益差异完全归因于遮挡；不是严格的只改变遮挡程度的因果实验。
+
+任务墙钟中位数（秒；各 n=6）：
+场景          额外延迟ms   Serial     Naive      Dynamic
+independent       0        2.6466     2.6939     2.6562
+independent      50        2.7626     2.6932     2.6969
+independent     100        2.8771     2.7793     2.7564
+independent     200        3.0882     2.8787     2.8784
+independent     500        3.6809     3.1885     3.1933
+occluded          0        2.6631     2.7145     2.6674
+occluded         50        2.7401     2.7519     2.7118
+occluded        100        2.8746     2.8042     2.7799
+occluded        200        3.0597     2.8608     2.9011
+occluded        500        3.7066     3.1975     3.2008
+
+结论：
+- 原生计算只有几 ms，流水线没有稳定优势；本次 Naive 在 0 ms 下两场景均 6/6 次慢于 Serial。
+- 无遮挡组最小明确获益的已测试点是额外 50 ms；遮挡组是 100 ms，均为 6/6 配对更快。
+- 遮挡 50 ms 的 Dynamic 净节省中位数 10.4 ms，探索性 95% bootstrap 区间 -19.2～68.1 ms，
+  跨零。不能把 50/100 ms 写成普适或精确的盈亏平衡阈值。
+- 遮挡 Naive 的 30 个正式回合每回合一次无效早算，共 30 次；Dynamic 为零。
+- 遮挡所有负载下，Dynamic 相对 Naive 的配对区间均跨零，尚未证明其稳定更快。
+- 这些失效是遮挡空观测，不等于已验证通用状态/缓存失效处理。
+中位数表直接相减不等于“配对差值的中位数”；效应请读取 comparison.json 的 effects。
+
+7. 耗时口径：后续 agent 最容易误读的部分
+
+wall_duration_s 是 Scheduler 开始记录到后台收尾结束，覆盖任务内采图、监测、验证、
+调度、事件日志和等待。编译/环境初始化/运行前后图像导出不在该窗口，不能叫冷启动总耗时。
+task_timing_wall_s 还包含调度器构造、最终目标检查与计时包装，本批中位额外约 2.8 ms。
+fast 模式等纯计算时冻结物理；real_time 模式尽力按 20 Hz 节拍并在等待时维持控制。
+仿真控制时间、主机墙钟和真实 FR3 完成时间不同；本批使用 fast，未测真实 FR3。
+
+旧日志 MOVE span 是整个微操作的驻留区间，可能包含穿插采图/调度，不能全算机械运动。
+旧 CAPTURE 节点也没覆盖所有监测采图。旧数据未分测的类别在 historical_decomposition.json
+中保持 null，不能把未分类残差全部归给调度。不要用新测量回填为旧数据的“实测分项”。
+
+当前 cost_profile.json 的主线程区间互斥、连续，加和严格等于 wall_duration_s。
+后台感知是重叠的另一条轴，不能再与前台简单相加。主要字段：
+  image_acquire_format：渲染、RGB-D 格式转换及后端内部复制，扣除独立验证/日志。
+  image_snapshot_copy：额外制作不可变快照的复制，不代表后端所有内存复制。
+  state_validation：可见性掩膜、速度/版本、接触和放置检查；掩膜计算归此类，避免重复记账。
+  scheduler_decision：依赖/资源/就绪/分支扫描、分派和事件边维护。
+  physics_step：实际 env.step 的控制器计算和物理积分，不是真实机械臂纯运动时间。
+  robot_control：微操作推进、插值及控制外围工作。
+  compute_wait_poll：无物理操作推进时的计算等待，可能含计算结束后的轮询尾部。
+  profiling_analysis：分析等待原因的仪表成本；其他计时成本也分布于各类/维护项，非零开销。
+  logging / runtime_bookkeeping / foreground_plan / shutdown_wait：其余前台工作。
+  perception_wall_s：PERCEIVE 总墙钟；另报 injected_wait_wall_s、去注入时间和 worker_thread_cpu_s。
+
+exposed_critical_compute_s 的严格定义：没有物理微操作推进，worker 确实在执行，且该
+worker 位于下一物理节点未完成的数据链，或占用了该链需要的资源。保存 node/attempt/
+blocked_physical 与 data_dependency/resource_conflict，可回看等待原因。
+这是关键等待链上暴露计算时间的可核查下界，不是整张反事实执行图的最长路径，也不包含
+计算间接拖慢物理仿真的干扰；不要把这个限制删掉。
+
+三个不同量：
+  compute_physical_residency_overlap_wall_s：与物理微操作整个驻留区间交集。
+  compute_actual_physics_overlap_s：与独占 env.step 区间交集，排除穿插的采图等。
+  saved_wall_s：同条件成功配对的 T_serial - T_candidate，才是实际净节省，允许为负。
+旧 compute_physics_step_overlap_wall_s 是较宽的 backend._step 区间，还含后端检查；
+不要与新 env.step 独占口径混用。
+
+完全遮挡、每次注入 200 ms 的均值示例（单位 ms）：
+项目                              Serial        Naive       Dynamic
+PERCEIVE（含注入）                 405.91        610.86        406.71
+图像采集/格式/额外复制              181.73        211.18        185.96
+调度                               12.01         52.54         57.62
+状态验证                          144.40        143.32        143.32
+物理积分和控制                   2313.00       2294.73       2305.75
+计算等待/轮询                     398.46        167.81        183.39
+直接暴露的关键计算                396.59        163.05        181.08
+与物理驻留区间重叠                  0           403.65        201.72
+与 env.step 重叠                    0           371.26        185.00
+配对相对 Serial 实际净省             0           182.63        176.37
+感知、关键等待和重叠是覆盖/子集量，整表不能相加；尚有日志/维护等前台成本。
+Dynamic 等待减少约 215 ms，调度增加约 46 ms，净收益不能等同重叠时长。
+Naive 计算重叠更大，部分却是最终丢弃的工作；“少算”也不一定等于“更快”。
+
+原生 0 ms 注入、遮挡 Dynamic 的主要前台成本均值：采图/复制约 188 ms、验证 143 ms、
+调度 37 ms（Serial 约 7.5 ms）、物理仿真/控制约 2288 ms；两次感知墙钟中位数仅 6.37 ms。
+下一步应先解释和减少可测的重复工作，不能只盯几 ms 的感知计算。
+
+8. 文件证据与历史实验优先级
+
+最新根目录 runs/experiments/pmir_cost_sweep_20261110/：
+  README.txt / verification.json              产物索引、审计和历史测试结果
+  initial_files.json / before/                 开工时 515 个文件哈希及 8 个被改文件的旧副本
+  historical_decomposition.json              首轮日志回溯，缺失项未伪造
+  dynamic_vs_naive.json                       直接比较两种流水线的配对差及区间
+  sweep/manifest.json / source_snapshot/       实际测量的精确代码、参数、版本、线程限制
+  sweep/order.json                            全部真实运行顺序，含预热
+  sweep/results.json                          全部正式逐轮结果
+  sweep/comparison.json                       groups / pairs / effects，含 P90 和配对区间
+  sweep.log                                  运行日志
+  figures/latency_sweep.png / .svg             全扫描曲线
+  figures/time_decomposition.png / .svg        前台成本分解
+  figures/cost_timeline.png / .svg             三模式详细时间线
+  figures/invalid_computation.png / .svg       无效计算曲线
+  figures/dependency_graph.* / timeline.* / visibility_evidence.png
+
+单轮目录格式：
+  sweep/measured_00/seed_7/occluded/delay_200ms/dynamic/
+包含 policy.py、graph_initial/final.json/.mmd、events.jsonl、physics_events.jsonl、
+task_timing.json、result.json、cost_profile.json、before/after.png、RGB-D 与 visibility_*。
+主图详细时间线选的是 repeat 0 实例，不是全组中位数。
+读取扫描延迟时要看 manifest.arguments.delays_ms 和逐轮 injected_delay_per_perceive_s；
+manifest 顶层 optional_latency_injection_s=0 来自兼容的单延迟参数，不能据此误判扫描没注入。
+
+首轮接触仿真：runs/experiments/pmir_20261110/
+  native_final/、latency_200ms/：各 12 正式 + 4 预热；当时仅 Serial/Dynamic、样本较少。
+  paced_occluded/：1 对 real_time 节拍实验；不作为稳定加速结论。
+  native/ 与测试争用资源，已被 native_exclusion.txt 排除；不要混入正式总体。
+  source_snapshot/、verification.json、figures_reviewed/ 保留当时实现证据。
+旧遮挡 200 ms 未见稳定净收益和新扫描结果不是“已经完成一次优化”的因果对比；负载顺序、
+重复/种子及仪表不同，不能拿不同时期中位数作优化前后实验。
+
+2026-11-09 逻辑基准：runs/experiments/pipeline_20261109/，用于原感知/Hybrid 修复逻辑；
+不与上述实际接触仿真混算。其真实图像、FR3 历史细节见旧交接；本轮未重新核实设备在线。
+
+9. 验证状态与尚存问题
+
+2026-11-10 执行的最新测试：
+- .venv-robosuite：tests/test_pmir.py + tests/test_pmir_robosuite.py，28 passed。
+  覆盖两场景三模式接触抓放、同初态/动作/步数、空观测重采、陈旧证据停止、冻结快照、
+  互斥成本加和、关键等待裁剪等。
+- .venv-mobileclip2-fr3：感知流水线/Hybrid/计时/CaP/PMIR 指定回归，98 passed。
+集合有重叠，不能相加。首轮 23/124、旧生产 104 等是不同代码时点和测试集，不当成当前全量。
+2026-11-09 扩大离线回归：765 passed, 2 skipped, 10 failed。
+10 项涉及 multiprocessing Manager 的 socket 被沙箱拒绝，随后清理阶段出现 shutdown
+AttributeError。没有解决或屏蔽这些硬件 IPC 项，不能宣称全量回归通过。
+
+最新扫描 verification.json 记录：180 profiles 无区间断裂/成本加和/重采顺序问题；
+当时 515 个既有文件仅 8 个本次范围文件变化，其余 507 个逐字节保持原样。
+这些数字描述当次审计，不是后续修改可以任意沿用的保证。
+
+2026-11-11 为本次交接另外核对：
+- 活动仓库、分支、HEAD 如上，关键未提交文件仍在。
+- 最新 sweep 的 19 个源码哈希与当前工作树全部一致，无源码偏离。
+- results 仍为 180 成功记录，comparison 仍为 120 可比配对；解释器路径存在。
+- 今天没有重新执行 pytest、仿真、真实模型或真机；以上通过数均注明其历史时点。
+
+10. 可直接使用的命令（选择新目录，不自动重跑全部基线）
+
+进入仓库：
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+
+仿真/PMIR 测试（修改相关代码后再运行）：
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv-robosuite/bin/python -m pytest -q \
+    tests/test_pmir.py tests/test_pmir_robosuite.py
+
+相关生产离线回归：
+  .venv-mobileclip2-fr3/bin/python -m pytest -q \
+    tests/test_task_perception_pipeline.py tests/test_hybrid_execution.py \
+    tests/test_task_timing.py tests/test_cap_policy.py tests/test_pmir.py
+
+完整复现扫描（下述目录必须不存在；已存在就换名，勿删除原结果）：
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 .venv-robosuite/bin/python -m simulation.pmir.experiment \
+    --output-dir runs/experiments/pmir_cost_sweep_20261111_new \
+    --seeds 7 --repeats 6 --warmups 1 \
+    --modes serial naive dynamic --delays-ms 0 50 100 200 500
+
+只读取已完成扫描并重绘图，不再执行仿真：
+  .venv-mobileclip2-fr3/bin/python scripts/plot_pmir.py \
+    --run-dir runs/experiments/pmir_cost_sweep_20261110/sweep \
+    --output-dir runs/experiments/pmir_figures_20261111_new \
+    --sweep --delay-ms 200 --scenario occluded --repeat 0
+
+不把仿真命令改成 FR3 命令，也不把模拟坐标复制到硬件配置。
+
+11. 下一 agent 建议接续顺序（尚未执行，具体以后续用户指令为准）
+
+第一步，阅读最新成本报告与源码，在保留现状的前提下选一个瓶颈。无需重新搭 PMIR、
+重新安装 robosuite、重新说明已有架构或无目的重跑 180 回合。
+
+优先候选 A：降低 scheduler 每个控制步的依赖/就绪遍历成本。
+考虑已有图的父/子索引、增量就绪等，但必须同步维护运行时 event 边、资源互斥、分支
+跳过及 Naive 重采状态；不能为省开销绕过事件、版本检查或物理顺序。先做这一项消融。
+
+优先候选 B：减少重复的采图/可见性验证。
+可核对同一已确认状态快照的复用机会和必要验证位置；不能简单删验证让时间变短。
+状态变化必须正确失效；成功、接触与稳定放置标准不变。与调度优化分开测量。
+
+如果先追求实验严谨性：
+在同一物体布局下受控改变可见性，补上跨场景初态混杂；在 0～100 ms 加密测试点。
+保留无并行机会、完全不可见和失败场景，不能只选收益大的任务。
+
+每个优化使用相同设置、平衡顺序的当前 baseline/candidate 配对；需要时在独立副本中
+载入归档 baseline 源码，不覆盖主工作树。不要把上一天的机器耗时直接当优化前对照。
+保持动作/步数/初态/成功判据一致，统计净总墙钟、无效计算、关键等待及各前台成本。
+测试与正式计时顺序执行，不同时运行消耗资源的测试、绘图或其他实验。
+
+之后才逐步增加实际模型工作负载：使用已有固定 RGB-D/已有服务，在允许请求的环境中
+测真实推理和资源争用；不先解除资源锁、不假装 sleep 相当于真实 GPU 模型。
+当前真机状态未知，现场标定/观测/缓冲可用性和动作授权需重新依照当前任务核实。
+PEIP、通用恢复、抽屉和倒水依然是后续研究，不是当前交付物或当前必须新增的模块。
+
+可给下一 agent 的开场指令：
+“请先阅读 docs/session_handoff_20261111.txt，在 SSD 活动仓库继续工作，保留全部既有修改。
+先核对最新成本报告和源码，暂不增加新模块。优先针对已有调度或采图验证的一个瓶颈做
+可复现消融，保持同初态、动作顺序、控制步数、成功标准和计时口径。区分人工延迟、
+真实模型、接触仿真和真机；不重新部署，不启用碎片合并，不使用历史位姿或缓冲位。”

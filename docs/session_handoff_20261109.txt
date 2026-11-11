@@ -1,0 +1,208 @@
+项目交接：armcode-agent，后续重点为流水线优化
+整理日期：2026-11-09。主要实验发生于 2026-11-04～05。
+本次仅核对源码、配置和已有实验记录，没有重新检测硬件在线状态或运行真机动作。
+
+1. 用户目标与工作约定
+用户希望得到可用于后续实验的 FR3 + Robotiq 2F-85 + 双 RealSense + 本地 VLM 机器人 agent。
+目标方向：任务图 + 任务级 CaP + 流水线 + 遮挡探索 + 有预算的错误恢复。
+下一会话重点持续推进流水线工作，不必重新部署，也不要将注意力只放在单帧遮挡图美化上。
+偏好：少做防御性编程，直接完成已授权工作；充分利用已有代码与可视化。
+当前明确要求：不进行掩膜碎片合并，先提高复杂遮挡关系判断质量。
+最近探索实验沿用“将西瓜霜放到蓝色盘子中”。最近实验为采集/离线规划/模拟反馈，不是新一轮真机清障授权。
+新场景编号只在该帧内有效，不跨帧代表同一物体。
+
+2. 活动项目、环境和版本
+真正活动仓库：/home/wpy/projects/armcode-agent (1)/armcode-agent
+项目外层：/home/wpy/projects/armcode-agent (1)
+运行依赖：/home/wpy/armcode-runtime
+ROS 工作区：/home/wpy/armcode-runtime/ros_ws
+本机当前会话 cwd 仍可能指向旧机械盘 /home/wpy/data/wpy/armcode-agent (1)，不要在旧副本开发。
+主感知解释器：活动仓库/.venv-mobileclip2-fr3/bin/python
+基础 Python 环境：/home/wpy/armcode-runtime/agent
+VLM 隔离环境：活动仓库/.venv-vlm-local
+本地 VLM 启动：bash /home/wpy/qwen-vl-local/start.sh
+模型：qwen3vl-8b-awq；接口 http://127.0.0.1:8010/v1；历史配置 GPU 1 用于 VLM，GPU 0 用于感知。
+当前 git 分支 feat/occlusion-observation-scheduling，HEAD a01b3db。
+大量既有修改及新增文件未提交，包含本轮核心功能。禁止 reset/clean 或用 HEAD 覆盖工作树。
+主仓库在本会话 writable roots 之外；如需写入应走工具支持的权限提升流程，不因此改到旧副本。
+
+3. 部署与硬件进展
+代码、运行环境、模型和缓存已迁入 SSD，原机械盘内容保留。
+历史记录已验证 FR3 FCI 连接、双相机采集、夹爪串口读取、ROS2/MoveIt2 Docker 运行。
+2026-11-05 曾完成低速上移 20 mm 的真实机械臂运动；不代表长期运动或整套抓放恢复已通过。
+当前配置 config/hardware/fr3.yaml：grasp_backend=graspnet_baseline。
+曾试用 GSNet，后来按用户要求切回原版 GraspNet-baseline；AnyGrasp 许可由用户处理，不要假设已经拿到。
+本次没有核实 11 月 9 日设备开机、FCI、Docker、USB、VLM 服务状态。
+参考 docs/deployment_ssd_20261104.txt、docs/restoration_20261105.txt、docs/graspnet_baseline_20261105.txt。
+
+4. 项目架构与策略后端
+默认 policy_backend 仍为 template，不是 hybrid。
+--policy_backend template：原任务图/动作模板基线。
+--policy_backend cap：LLM 生成 Python；允许函数、有限循环、条件；AST 解释器调用技能。
+--policy_backend hybrid：任务图组织有序 grasp/place 子任务，每个子任务生成代码，反馈驱动局部修复。
+定位是借鉴 InstructFlow 任务图 + 任务级 CaP，不是完整复现 CaP-X/原论文所有控制能力。
+当前代码接口只有 observe(target)、pick_place(target, container)。没有自由 Python/任意机器人坐标控制。
+具体遮挡清障与重观测仍由技能内部恢复模块负责，不是 LLM 显式生成完整清障代码。
+observe 的成功可能仅表示取得了可用场景，不能把 ensure_visible() 的名字当成身份已确认。
+目标身份与几何仍在受控抓取入口再次检查。
+主要代码：
+  agents/simple_agent_system.py、agents/simple_execution_runtime.py
+  agents/cap_code_generator.py、agents/cap_execution.py、agents/hybrid_execution.py
+  runtime/cap_policy.py、runtime/task_state.py
+参考 docs/cap_and_gentle_place_20261105.txt、docs/hybrid_occlusion_20261105.txt。
+
+5. 已有流水线——继续工作前先读这些
+A. 首帧感知与容器预观察重叠
+  runtime/task_perception_pipeline.py：TaskPerceptionPipeline。
+  主线程先冻结图像，单后台线程分析已有首帧、识别/建图，并在满足条件时预计算抓取候选。
+  前台同时进行容器预观察；回到源观测位后等待结果并发布。
+  后台 context 不持有 camera/arm/gripper，不负责硬件动作或占用缓冲位。
+  publish 检查观测 epoch、任务绑定和捕获位姿；场景已改变或视角不符就丢弃结果。
+  候选预计算需要 transforms 等条件，并非每次自动生效；实际是否预计算/命中必须查看报告。
+  --disable_perception_pipeline 可作串行对照。
+B. 下一子任务代码预生成
+  agents/hybrid_execution.py：单后台线程，在执行当前子任务时预生成下一个子任务代码。
+  代码绑定图 revision；修复图后废弃旧 future，生成当前节点新版本；完成前缀不重放。
+  --disable_policy_pipeline 可作串行对照，仅影响 hybrid 代码预生成。
+  单个 grasp/place 对没有下一子任务，不能用它评估代码预生成收益。
+  future.cancel() 不能中止已运行的 LLM HTTP 请求；退出时 shutdown(wait=True) 可能等待完成。
+  这是可检查的调度开销点，不是已经证明的瓶颈。
+C. 已有资源与缓存
+  runtime/perception_pipeline.py：GPU/OCR 资源序列化、有界工作队列。
+  services/sam3_model_pool.py：共享冻结 SAM3 权重；每图/提示的 processor 状态独立。
+  runtime/observation_memory.py、skill_lib/actions/observation_cache.py：场景/观测版本与位姿绑定。
+  不要绕过现有版本检查，跨搬运复用旧图、旧抓取候选或轨迹。
+D. 计时
+  runtime/timing.py；文档 docs/task_timing.txt。
+  task_timing.json：duration_s 是入口总墙钟；spans 有 start_s/duration_s/parent_id/background/线程等。
+  GPU/OCR 锁等待也有记录；嵌套与并行 span 不可简单相加。
+  TaskPerceptionPipeline 记录 analysis_s、candidate_prefetch_s、join_wait_s、候选缓存状态等。
+  hybrid_trace.json 记录 prefetch_started/used/failed/invalidated；task_state.json 记录状态和预算。
+  move 耗时包含通信、规划和执行，不是纯运动时长。
+  预览窗口等待、人工故障处理也可能进入总耗时；实验需控制这些条件。
+目前尚无同条件串行/流水线的真实端到端加速结论，不要将单元测试通过当成吞吐提升。
+
+6. 遮挡算法进展与目前默认状态
+几何链路保留：多尺度候选、小前景深度分离、局部边界关系、平面延拓、共同遮挡、多层依赖/冲突。
+默认关闭：碎片关联、完整掩膜合并、VLM 碎片辅助；不要未经需求变更重新启用。
+关系图节点可能是可见区域，不一定是完整/独立物体。
+核心：occlusion_reasoning/relations.py、planar.py、collective.py、structure.py。
+服务：services/wrist_occlusion_service.py；分割：perception_v2/proposal_refinement.py。
+明确区分图像遮挡、深度先后、物理接触/承重，不能相互等同。
+
+预训练后端：
+  occlusion_reasoning/pretrained_order.py
+  occlusion_reasoning/replay_pretrained_order.py
+  官方 InstaOrderNet_o，未训练；RGB+两可见掩膜推断双向关系，不修改掩膜。
+  模型：/home/wpy/armcode-runtime/models/instaorder/InstaOrder_InstaOrderNet_o.pth.tar
+  官方源码：/home/wpy/armcode-runtime/models/instaorder/source
+  commit dd88eceea300f60722b763f66335ca0099007aea
+  SHA256 3b235a08ac51571abbfcd0474d75be145e148903c323a91788e1ff2f21e736f9
+  复用几何邻接/掩膜冲突/第三物体阻隔/深度反向规则；保留原几何基线。
+  新增模型边要求 boundary.contact_fraction > 0（目前原几何容差 2 px）。
+  没有可见边界接触时进入 deferred_candidates/needs_boundary_verification，不断言无遮挡。
+  模型阈值仍为官方 0.5；输出分数没有本场景概率校准。
+  此后端仍未接入在线 WristOcclusionService/agent；当前只有离线回放和单独测试适配器。
+  仅运行正常 agent 不会自动使用这套新预训练关系图。
+参考 docs/relations_only_20261105.txt、docs/instaorder_trial_20261105.txt、docs/occlusion_boundary_support_20261105.txt。
+
+7. 最近真实图像及效果证据
+两个场景：
+  runs/occlusion_real/20261105_210200_30848d
+  runs/occlusion_real/20261105_214810_e256e8
+都通过 camera_only 拍摄，只使用相机；场景已经是历史记录，不视作当前硬件证据。
+最新场景推荐检查：
+  primary_aux/report.json：原几何图；
+  instaorder/：加入模型、边界支持规则前结果；
+  instaorder_boundary_supported/00_wrist/relations.json：当前自动结果；
+  review_wrist/：助手逐条视觉复核的结果，不能当成模型原始输出或独立人工真值。
+最新自动结果：6 条主图边 + 1 条待验证（N8盖板→N9下沿玩具，模型分数约 0.948）。
+主图：N2→N4/N6、N5→N7/N10、N12→N10、N8→N1。
+N7/N10 看起来可能是同一底层包装的两侧可见区域，没有合并。
+旧盖板场景候选 2→8 仅说明补边，不证明 8 条都正确。
+九视图固定模型分数回放中，旧 frame_01 的 N6→N5 也因无接触被降级，存在召回损失风险。
+回归记录：runs/experiments/instaorder_20261105/boundary_support_regression/report.json。
+历史无完整人工标注；不能报告精确率/F1 或零误报。
+
+InstaOrder 既有时延记录（RTX 4090 D）：
+  7～8 对邻居：约 50～92 ms／腕部图，含裁剪预处理，不含 SAM、加载、I/O、绘图。
+  91 对全量审计：一次约 248 ms；实际负载下会变动。
+  构建/权重加载约 0.41～1.96 s，首次预热约 0.20～0.38 s；不含 Python 进程导入开销。
+  最新腕部 SAM 记录约 15.5 s，几何提取约 0.45 s；不能将单次记录当稳定基准。
+  在线接入应常驻模型、复用 SAM 掩膜并批量处理邻居，不逐帧重启模型进程。
+  SAM 权重已有进程内缓存，不要未经剖析就声称“尚未缓存”；进一步区分新进程加载、多窗口推理与队列等待。
+
+8. 信息获取、恢复与最近代码测试
+agents/occlusion_recovery_planner.py：目标未知也可选择暴露的图根节点，单步决策。
+agents/information_plan.py：清障→重建场景→重新评估目标的计划。
+skill_lib/actions/geometry_occlusion.py、llm_occlusion_recovery.py：真实技能闭环与预算/缓冲位检查。
+runtime/information_state.py：任务证据状态；动作令旧证据失效，新观察才更新。
+信息分数不是信息熵或成功概率；动作完成不自动加分。
+最近测试：
+  runs/occlusion_real/20261105_214810_e256e8/information_policy_test/
+  policy.py/.cap.json、planning/information_plan.json、planning_trace.json、test_report.txt。
+  实际调用本地 Qwen，使用自动 6 边图（不读取人工删边），生成代码进入原恢复模块。
+  选择 N2，预计揭示 N4盘沿和N6白盒；步骤含重新拍摄，不假定找到西瓜霜。
+  目标身份此测试设为 unknown，未执行新的目标识别。
+  规划没有已核实缓冲位、没有实时法兰位姿/抓取运输可行性，故未执行搬运。
+  三种模拟反馈通过：搬运失败停止；重观测失败停止；无变化且预算耗尽暂停，不重复清障。
+  simulated_feedback 中的位姿/缓冲位为合成夹具，所有硬件方法是记录桩，严禁复用作实机坐标。
+  replay_* 脚本是本次实验归档，输出目录固定且拒绝覆盖，复跑先指定/调整新的输出目录。
+暴露问题：reveal_branch_count 把盘沿和药盒区域等权计数，同物体碎片可能重复计数。
+N2 与 N5 均为 2 分支；选择 N2 不证明更利于找到西瓜霜。
+尚未测得真实搬运后的信息增量。
+
+9. 放置与错误恢复状态
+config/hardware/fr3.yaml 当前 gentle_place_enabled=true、place_height_mode=fixed。
+减速下降、停稳张爪、低速撤离已实现；仍用现有 PTP，不是力控或严格直线。
+可选 stack_rgbd 已有代码，但未启用；物体底部偏移、支撑面与堆叠实机效果尚待验证。
+固定高度减速不等于低落差堆叠。
+错误恢复保留已完成任务、持物/阶段、预算、缓冲占用；硬件故障不会被策略无限重试。
+
+10. 下一会话建议执行顺序：以流水线为主
+第一步：确认活动 SSD 仓库，读取本交接与 docs/hybrid_occlusion_20261105.txt、docs/task_timing.txt。
+第二步：用至少两个 grasp/place 子任务建立串行、感知重叠、代码预生成、二者同时开启的对照。
+  固定输入场景/模型/策略后端/采样设置和输出目录；将冷启动与热启动分开，不能比较不同任务。
+  no_run_executor 仅能检查代码生成，无法测量运动与计算的重叠。
+  先用模拟执行验证调度正确性，再在实际授权和现场条件下做真机时间线。
+第三步：以总墙钟、join wait、锁等待、预生成命中/失效/浪费时间、成功率和重试数找瓶颈。
+  用 spans 的时间区间检查重叠，不把重叠阶段相加，不以扩大预算、改变动作来冒充加速。
+第四步：减少重复感知；以同帧 RGB-D/哈希和场景版本复用分割结果，保持处理器线程状态隔离。
+第五步：将 InstaOrder 常驻后端接到在线同帧感知结果，输出正式边和待验证候选，再进入恢复快照。
+  不重复运行 SAM；不让后台线程直接修改机器人状态；前台版本校验后发布。
+  预计算对象若与 LLM 最终选择的遮挡物不同，应测量浪费，不能直接复用错误节点候选。
+第六步：优化任务相关的探索收益；区分可见区域数量与任务信息，暂不打开不稳定碎片合并。
+第七步：有当前标定/位姿、可行抓取和空闲缓冲位时做真实搬运→重观测，评估信息变化。
+不要同时大改调度、感知算法、策略接口和执行顺序，否则无法解释性能提升来源。
+
+11. 方便新会话使用的入口（只列不执行动作的例子）
+cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+bash /home/wpy/qwen-vl-local/start.sh
+
+代码生成检查：
+bash run_fr3_agent.sh --simple_actions --local_vlm qwen3vl-8b-awq \
+  --use_llm_planner --policy_backend hybrid --no_run_executor \
+  --goal '将西瓜霜放到蓝色盘子中，再将抗病毒口服液放到粉色盘子中'
+注：正式对照应使用独立 --plan_json、--plan_md、--generated_code 等输出路径，避免覆盖 current_plan。
+串行消融增加 --disable_policy_pipeline 和/或 --disable_perception_pipeline。
+
+保存场景的模型回放（output-dir 需为新目录）：
+.venv-mobileclip2-fr3/bin/python -m occlusion_reasoning.replay_pretrained_order \
+  --view-dir runs/occlusion_real/20261105_214810_e256e8/primary_aux/wrist \
+  --output-dir runs/experiments/instaorder_new_session_replay
+
+与流水线相关的优先测试：
+.venv-mobileclip2-fr3/bin/python -m pytest -q \
+  tests/test_task_perception_pipeline.py tests/test_hybrid_execution.py \
+  tests/test_task_timing.py tests/test_cap_policy.py
+如修改遮挡/恢复，再跑 test_pretrained_order.py、test_occlusion_relations.py、
+test_occlusion_primary_aux.py、test_geometry_occlusion_agent.py、test_occlusion_recovery_planner.py。
+scripts/check_core.py 是已有较大离线回归入口，按修改范围使用。
+
+12. 历史验证口径与交接注意
+边界支持相关测试 43 项通过；最近代码/恢复测试 112 项通过；不是相加后的独立测试数。
+更早文档中的 603/698/707/757 等为不同时点和不同集合的结果，不能当作本日全量回归。
+本次整理只核对文件存在、源码与配置状态，没有重跑这些测试或核验设备。
+截至本次交接，不能宣称：已完成全程真机信息获取、已验证完整 CaP-X、已有稳定流水线加速比例、
+遮挡图全部准确、柔和模式已解决所有堆叠落差。
+下一会话请延续现有实现与证据，在独立实验目录中继续推进流水线。

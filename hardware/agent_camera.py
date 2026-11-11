@@ -6,6 +6,7 @@ import hashlib
 import time
 import uuid
 import threading
+from runtime.timing import timing_stage
 
 import numpy as np
 
@@ -85,17 +86,18 @@ class CalibratedCamera:
             return cached
         epoch = memory.epoch
         before_time = time.time()
-        first = self.camera.capture_wrist()
-        frame_number = first['color_frame_number']
-        deadline = time.monotonic() + 5
-        while True:
-            time.sleep(.03)
-            capture = self.camera.capture_wrist()
-            if (capture['color_frame_number'] >= frame_number + 2
-                    and capture['timestamp'] >= before_time):
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError('No fresh stationary wrist RGB-D frame')
+        with timing_stage('RGB-D新帧采集', detail='wrist'):
+            first = self.camera.capture_wrist()
+            frame_number = first['color_frame_number']
+            deadline = time.monotonic() + 5
+            while True:
+                time.sleep(.03)
+                capture = self.camera.capture_wrist()
+                if (capture['color_frame_number'] >= frame_number + 2
+                        and capture['timestamp'] >= before_time):
+                    break
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('No fresh stationary wrist RGB-D frame')
         after = self.arm.get_pose()
         difference = pose_difference(before, after)
         if difference['translation_m'] > .001 or difference['rotation_rad'] > .01:

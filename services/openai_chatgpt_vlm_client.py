@@ -4,6 +4,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from urllib.parse import urlparse
+from runtime.perception_pipeline import serialized_resource, release_idle_gpu_cache
+from runtime.timing import timed_stage
+
+
+@serialized_resource('gpu')
+def _post_local(url, **kwargs):
+    # Coordinates server requests with SAM3/AnyGrasp calls in this Agent process.
+    # The separate VLM process keeps its weights/cache resident between calls.
+    release_idle_gpu_cache()
+    with requests.Session() as session:
+        session.trust_env = False
+        return session.post(url, **kwargs)
 
 
 class OpenAIChatGPTVLMClient:
@@ -25,7 +38,17 @@ class OpenAIChatGPTVLMClient:
         self.api_key = api_key
         self.model_name = model_name
         self.timeout = timeout
+        self.compact_planning = model_name in ('qwen35-9b-awq', 'qwen3vl-8b-awq')
 
+    def _post(self, payload):
+        if self.model_name in ('qwen35-9b-awq', 'qwen3vl-8b-awq'):
+            payload['chat_template_kwargs'] = {'enable_thinking': False}
+        post = _post_local if urlparse(self.base_url).hostname in ('127.0.0.1', 'localhost', '::1') else requests.post
+        return post(f'{self.base_url}/chat/completions',
+            headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {self.api_key}'},
+            json=payload, timeout=self.timeout)
+
+    @timed_stage('VLM图像请求')
     def describe_images(
         self,
         image_paths: List[str],
@@ -35,12 +58,6 @@ class OpenAIChatGPTVLMClient:
         response_format: Optional[Dict[str, Any]] = None,
         image_labels: Optional[List[str]] = None,
     ) -> str:
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
-
         content = [{"type": "text", "text": prompt}]
         for index, image_path in enumerate(image_paths):
             if image_labels and index < len(image_labels) and image_labels[index]:
@@ -63,12 +80,7 @@ class OpenAIChatGPTVLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-        )
+        response = self._post(payload)
         if response.status_code != 200:
             raise RuntimeError(
                 "OpenAI-compatible VLM request failed. "
@@ -91,6 +103,7 @@ class OpenAIChatGPTVLMClient:
             return "\n".join(texts).strip()
         return str(content).strip()
 
+    @timed_stage('LLM文本请求')
     def chat(
         self,
         text: str,
@@ -98,11 +111,6 @@ class OpenAIChatGPTVLMClient:
         temperature: float = 0.0,
         response_format: Optional[Dict[str, Any]] = None,
     ) -> str:
-        url = f"{self.base_url}/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
         payload: Dict[str, Any] = {
             "model": self.model_name,
             "messages": [{"role": "user", "content": str(text)}],
@@ -112,12 +120,7 @@ class OpenAIChatGPTVLMClient:
         if response_format is not None:
             payload["response_format"] = response_format
 
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            timeout=self.timeout,
-        )
+        response = self._post(payload)
         if response.status_code != 200:
             raise RuntimeError(
                 "OpenAI-compatible chat request failed. "

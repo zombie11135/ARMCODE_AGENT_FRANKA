@@ -71,7 +71,7 @@ class PickTests(unittest.TestCase):
         self.assertFalse(self.arm_ctor.call_args.kwargs['execution_enabled'])
         self.assertEqual(self.arm_ctor.call_args.args[0].singularity_screening, 'advisory')
         self.assertEqual(self.cfg.arm.singularity_screening, 'endpoint')
-        self.assertEqual(result['roi_xyxy'], [0, 0, 640, 480])
+        self.assertEqual(result['roi_xyxy'], [0, 0, self.cfg.cameras.width, self.cfg.cameras.height])
 
     def test_contact_then_lift_five_cm_from_actual_pose_without_orientation_flip(self):
         result = self.run_pick(execute=True)

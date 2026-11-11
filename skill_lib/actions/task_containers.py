@@ -65,7 +65,17 @@ def is_task_container_plan(robot, plan):
     if type(index) is not int or index < 0:
         return False
     expected = robot._offset_place_plan(record['plan'], index)
-    return all(list(plan[field]) == list(expected[field]) for field in POSE_FIELDS)
+    fields = list(POSE_FIELDS)
+    if plan.get('gentle_place'):
+        from hardware.gentle_place import prepare_place_plan
+        arm = getattr(robot.context, 'arm', None)
+        if getattr(getattr(arm, 'config', None), 'gentle_place_enabled', False) is not True:
+            return False
+        expected = prepare_place_plan(expected, arm.config)
+        fields.append('pre_release_pose_mmrad')
+        if plan.get('stack_support') != expected.get('stack_support'):
+            return False
+    return all(field in plan and list(plan[field]) == list(expected[field]) for field in fields)
 
 
 def discard_scene_evidence(robot, reason):

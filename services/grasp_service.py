@@ -1,5 +1,6 @@
 """Backend selection without importing the two incompatible gsnet packages together."""
 from hardware.config import load_config
+from runtime.perception_pipeline import serialized_resource
 from .runtime_service_cache import get_or_create_service
 
 
@@ -17,6 +18,10 @@ def build_grasp_service(config):
     if path and load_config(path).perception.grasp_backend == 'gsnet':
         from .gsnet_service import GSNetService
         return get_or_create_service('open_gsnet', {'config': str(path)}, lambda: GSNetService(path))
+    if path and load_config(path).perception.grasp_backend == 'graspnet_baseline':
+        from .graspnet_baseline_service import GraspNetBaselineService
+        return get_or_create_service('graspnet_baseline', {'config': str(path)},
+                                     lambda: GraspNetBaselineService(path))
     if path:
         from .anygrasp_fr3_service import AnyGraspFR3Service
         return get_or_create_service('fr3_anygrasp', {'config': str(path)}, lambda: AnyGraspFR3Service(path))
@@ -30,6 +35,7 @@ class LazySAM3:
         self.model_dir = model_dir
         self.prompt_mode = prompt_mode
 
+    @serialized_resource('gpu')
     def segment_by_bbox(self, *args, **kwargs):
         from .sam3_bbox_segmenter_service import SAM3BBoxSegmenterService
         params = {'model_dir': self.model_dir} if self.model_dir else {}

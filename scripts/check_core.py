@@ -7,8 +7,19 @@ ROOT = Path(__file__).resolve().parents[1]
 # Add a test here only after verifying it without models, local profiles or devices.
 TESTS = (
     "test_release_export.py",
+    "test_local_vlm.py",
     "test_runtime_structure.py",
     "test_simple_actions_components.py",
+    "test_gentle_place.py",
+    "test_execution_recovery.py",
+    "test_cap_policy.py",
+    "test_hybrid_execution.py",
+    "test_pipeline_benchmark.py",
+    "test_occlusion_complex.py",
+    "test_instance_resolution.py",
+    "test_fragment_association.py",
+    "test_information_state.py",
+    "test_vlm_fragment_advisor.py",
     "test_planner_action_integrity.py",
     "test_multi_target_planning.py",
     "test_same_session_replanning.py",
@@ -26,6 +37,7 @@ TESTS = (
     "test_observation_memory.py",
     "test_perception_pipeline.py",
     "test_task_perception_pipeline.py",
+    "test_task_timing.py",
     "test_reference_recognition.py",
     "test_observe_gallery.py",
     "test_reference_capture.py",
@@ -45,6 +57,8 @@ TESTS = (
     "test_fr3_hardware.py",
     "test_agent_home_command.py",
     "test_grasp_yaw_preference.py",
+    "test_gsnet_environment.py",
+    "test_graspnet_baseline.py",
     "test_gripper_process.py",
 )
 

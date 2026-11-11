@@ -58,8 +58,13 @@ def replay(args):
         raise ValueError('Observation and GSNet capture-time geometry differ')
     workcell = json.loads((Path(cfg.arm.workspace) / 'config/workcell.json').read_text())
     request = {**request, 'grasp_table_clearance_check': workcell.get('grasp_table_clearance_check', True)}
-    sdk = args.sdk.resolve()
-    checkpoint = sdk / 'log/checkpoint_detection.tar'
+    sdk_path = args.sdk or cfg.perception.anygrasp_dir
+    if not sdk_path:
+        raise ValueError('Configure perception.anygrasp_dir or pass --sdk')
+    sdk = Path(sdk_path).expanduser().resolve()
+    checkpoint = (Path(cfg.perception.anygrasp_ckpt).expanduser().resolve()
+                  if args.sdk is None and cfg.perception.anygrasp_ckpt
+                  else sdk / 'log/checkpoint_detection.tar')
     output = args.output.resolve() if args.output else (
         PROJECT_ROOT / 'runs/anygrasp_offline' / datetime.now().strftime('%Y%m%d-%H%M%S-%f'))
     output.mkdir(parents=True, exist_ok=False)
@@ -88,7 +93,7 @@ def replay(args):
 
     # Licensed gsnet and open-source gsnet must run in separate processes.
     sys.path.insert(0, str(sdk))
-    from gsnet import AnyGrasp
+    from .anygrasp_sdk import AnyGrasp
     from graspnetAPI import GraspGroup
     import torch
     from services.anygrasp_service import pushd
@@ -207,7 +212,7 @@ def main():
     infer.add_argument('--gsnet-run', type=Path, required=True)
     infer.add_argument('--observation', type=Path, required=True)
     infer.add_argument('--config', type=Path, default=DEFAULT_CONFIG)
-    infer.add_argument('--sdk', type=Path, default=Path('/home/seur/franka_teleop/graspNet/anygrasp_sdk/grasp_detection'))
+    infer.add_argument('--sdk', type=Path, help='Override the SDK directory from the hardware config')
     infer.add_argument('--output', type=Path)
     infer.add_argument('--top-down', action='store_true')
     visual = sub.add_parser('view')

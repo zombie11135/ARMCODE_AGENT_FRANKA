@@ -16,6 +16,7 @@ from agents.replanning_agent import ReplanningAgent
 from agents.simple_code_generator import SimpleCodeGenerator
 from agents.simple_execution_runtime import SimpleExecutionRuntime
 from core.actions import SimpleAction
+from runtime.timing import timed_stage, timed_task
 # Re-export these names so existing callers keep their import paths.
 from runtime.camera import TaskCachedCamera as TaskCachedCamera
 from runtime.config import SimpleAgentSystemConfig as SimpleAgentSystemConfig
@@ -30,10 +31,19 @@ class SimpleArmCodeAgentSystem:
         self.config = config
         self.project_root = Path(config.project_root).resolve()
 
+    @timed_task
     def run(self) -> AgentSystemResult:
         from services.object_names import NameResolutionRequired
+        from runtime.cap_policy import PolicyError
         try:
             return self._run_task()
+        except PolicyError as error:
+            from services.object_reference_service import atomic_json
+            atomic_json(self.config.failure_report_path, dict(failure_type='policy_validation_failed',
+                error=str(error), automatic_replan=False))
+            return AgentSystemResult(success=False, plan_json=self.config.plan_json,
+                plan_md=self.config.plan_md, generated_code=self.config.generated_code,
+                failure_report_path=self.config.failure_report_path, executor_returncode=1, error=str(error))
         except NameResolutionRequired as error:
             from services.object_reference_service import atomic_json
             atomic_json(self.config.failure_report_path, {
@@ -89,9 +99,13 @@ class SimpleArmCodeAgentSystem:
 
             failure_path = Path(self.config.failure_report_path)
             automatic_replan = True
+            failure_error = "simple executor failed"
             if failure_path.exists():
-                automatic_replan = json.loads(failure_path.read_text()).get('automatic_replan', True)
-            if not automatic_replan or not self.config.enable_replan or replan_attempts >= self.config.max_replan_attempts:
+                failure_report = json.loads(failure_path.read_text())
+                automatic_replan = failure_report.get('automatic_replan', True)
+                failure_error = failure_report.get('error') or failure_error
+            if (self.config.policy_backend in ('cap', 'hybrid') or not automatic_replan or
+                    not self.config.enable_replan or replan_attempts >= self.config.max_replan_attempts):
                 return AgentSystemResult(
                     success=False,
                     plan_json=self.config.plan_json,
@@ -102,7 +116,7 @@ class SimpleArmCodeAgentSystem:
                     failure_report_path=self.config.failure_report_path,
                     executor_returncode=1,
                     replan_attempts=replan_attempts,
-                    error="simple executor failed",
+                    error=failure_error,
                 )
 
             replan_paths = self._replanning_stage(graph)
@@ -111,6 +125,7 @@ class SimpleArmCodeAgentSystem:
             replan_attempts += 1
             print(f"[replanning] retry attempt {replan_attempts}/{self.config.max_replan_attempts}")
 
+    @timed_stage('任务规划')
     def _planning_stage(self):
         print(f"\n[planning] 任务：{self.config.goal}")
         context = self._build_planner_context()
@@ -128,15 +143,43 @@ class SimpleArmCodeAgentSystem:
         print(f"[planning] done: plan={self.config.plan_md}")
         return graph
 
+    @timed_stage('动作代码生成')
     def _coding_stage(self, graph, recovery: bool) -> List[SimpleAction]:
         print("\n[coding] 生成简短动作脚本")
         generator = SimpleCodeGenerator(project_root=str(self.project_root))
-        generator.generate(
-            graph=graph,
-            output_path=self.config.generated_code,
-            recovery=recovery,
-        )
         actions = generator.build_actions(graph=graph, recovery=recovery)
+        if self.config.policy_backend == 'cap':
+            from agents.cap_code_generator import CapCodeGenerator
+            context = self._build_planner_context()
+            client = (getattr(context, 'planner_llm', None) or getattr(context, 'fallback_vlm', None)
+                      or context.require('vlm'))
+            self.config.cap_policy_source = CapCodeGenerator(client).generate(
+                self.config.goal, actions, self.config.generated_code)
+            print('[coding] CaP 策略代码已生成并通过有限 AST 检查和无设备预演')
+        elif self.config.policy_backend == 'hybrid':
+            from agents.cap_code_generator import CapCodeGenerator, task_pairs
+            from agents.hybrid_execution import node_actions, policy_client, subtask_goal
+            from services.object_reference_service import atomic_json
+            context = self._build_planner_context()
+            coder = CapCodeGenerator(policy_client(context))
+            pairs = task_pairs(actions)
+            directory = Path(self.config.generated_code).parent / (Path(self.config.generated_code).stem + '_nodes')
+            sources = []
+            for index, pair in enumerate(pairs if not self.config.run_executor else pairs[:1]):
+                path = directory / f'node_{index:03d}_r0.py'
+                scope = [n for n in generator._topological_nodes(graph) if n.skill in ('grasp', 'place')][2*index:2*index+2]
+                constraints = list(graph.constraints) + [c for n in scope for c in n.constraints + n.preconditions]
+                sources.append(coder.generate(subtask_goal(pair), node_actions(pair), path, constraints=constraints))
+            self.config.cap_policy_source = sources[0]
+            Path(self.config.generated_code).write_text(sources[0], encoding='utf-8')
+            atomic_json(directory/'manifest.json', dict(backend='hybrid', pairs=pairs,
+                generated_nodes=len(sources), policy_pipeline=self.config.enable_policy_pipeline))
+            print('[coding] hybrid：首个子任务代码已生成；后续节点按依赖调度')
+        elif self.config.policy_backend == 'template':
+            generator.generate(graph=graph, output_path=self.config.generated_code, recovery=recovery)
+        else:
+            from runtime.cap_policy import PolicyError
+            raise PolicyError('Unknown policy_backend')
         print("[coding] 即将执行的动作：")
         for index, action in enumerate(actions, start=1):
             print(f"  {index}. {action.op}({action.target})")
@@ -380,6 +423,7 @@ class SimpleArmCodeAgentSystem:
             "wrist": camera_service.capture_wrist(),
         }
 
+    @timed_stage('任务重规划')
     def _replanning_stage(self, graph) -> Dict[str, Any]:
         print("\n[replanning] build repair constraints from executor failure")
         path = Path(self.config.failure_report_path)

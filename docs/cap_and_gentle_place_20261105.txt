@@ -1,0 +1,104 @@
+2026-11-05：CaP 策略基线、放置与故障恢复第一轮
+项目：/home/wpy/projects/armcode-agent (1)/armcode-agent
+
+一、当前方法定位
+原来的 simple_actions 是 LLM 任务图 + 固定模板动作列表。生成 .py 文件不等于
+Code as Policies，原执行器实际上消费 SimpleAction 列表。
+新增 --policy_backend cap：LLM 生成 Python 策略；函数/有限循环/条件读取观察结果，
+经专门 AST 解释器调用技能。允许最多 3 轮补全未定义辅助函数。
+这是“任务级、受限技能接口”的 CaP 基线，不是论文全部控制能力的复现：没有任意
+NumPy/几何计算、自由 Python、关节控制或在线阻抗策略。仍使用任务图绑定目标和顺序。
+原论文/官方项目：https://code-as-policies.github.io/
+官方代码：https://github.com/google-research/google-research/tree/master/code_as_policies
+
+策略契约：
+  observe(target) -> bool：读取真实观察结果；同一策略每个目标最多 2 次。
+  pick_place(target, container) -> bool：现有 Gate、抓取、放置、可选验证、回 home。
+  pick_place 必须与任务图中目标/顺序一致，已完成任务不得重复。
+  感知失败可以由策略条件处理；运动/夹爪故障必须退出策略，不能被策略循环吞掉。
+解释器不调用 eval/exec；无 import/属性访问/文件网络访问/while/异常捕获；
+最多 2000 次解释步骤、64 个技能调用、8 层函数调用、range 最多 16 次。
+这些约束控制代码权限与预算，不能代替实机场景/碰撞检查。
+
+只生成代码（不打开执行硬件会话）：
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash run_fr3_agent.sh --simple_actions --local_vlm qwen3vl-8b-awq \
+    --use_llm_planner --policy_backend cap --no_run_executor \
+    --goal '将西瓜霜放到蓝色盘子中'
+
+原对照：--policy_backend template（默认）。
+CaP 将来实机运行：在原来的经过确认的运行参数中添加 --policy_backend cap；
+当前这一轮没有执行新的实机动作，不把离线通过当作实机验收。
+生成文件旁 .cap.json 保存提示词、模型响应、完整源代码、SHA256 和验证状态；
+plan_json 同目录 cap_trace.json 保存观察反馈、已完成对数和失败。
+验证放置仍受原 verify_place_vdm 配置控制，没启用时 success 不等于视觉验收通过。
+
+二、放置：已经启用的部分与尚需标定的部分
+当前硬件 YAML 已启用 gentle_place_enabled。
+执行顺序：所有阶段终点 MoveIt 预检查 -> 原接近位 -> 释放上方 25 mm -> 释放位 ->
+停稳 0.4 s -> 张爪 -> 等待 0.4 s -> 低速撤离。
+下降速度上限 0.03，撤离上限 0.05；若用户 --arm-speed 更低，取较小值。
+异常和成功都会恢复原速度设置。开爪失败不自动撤离。
+逐段仍为现有 MoveIt PTP，不保证严格直线，不是接触式/力控放置。
+目前 fixed 模式仍使用原法兰 Z=0.30 m：只减速并没有自动降低物体落差。
+不要以“柔和模式已启用”推断已经实现低落差堆叠。
+
+用户确认物体会堆叠，因此实现了可选 stack_rgbd：
+  每次抓取前（空手）强制重新观察目的容器，回 home 后再抓取。
+  校验 RGB-D 捕获姿态和标定；在落点周围检查支撑区域点云。
+  排除检测框边缘 10%；80 mm 正方形默认区域，8x8 网格至少 85% 有 >=3 点。
+  支撑 Z 采用区域 P95；P95-P5 高差超过 8 mm 或深度不足则拒绝。
+  支撑区域必须覆盖整个物体投影，80 mm 只是待校验的默认值，不适用于所有药盒。
+  偏移到其他落点时不得沿用原支撑高度。
+  释放法兰 Z = 当前支撑面 Z + 释放姿态下法兰至物体底面的垂直距离 + 10 mm。
+  工具包络底部还必须高于支撑面及位置公差；位姿仍经 MoveIt 检查。
+
+stack_rgbd 尚未在当前硬件 YAML 启用。启用前需：
+  1. 得到当前抓取物体在释放姿态下的底面偏移；不可把 TCP=150 mm 当作物体底面。
+     同一物体的不同抓取点也可能改变该偏移，不能随意对所有物体复用一个数值。
+  2. 确认支撑区域尺寸覆盖物体投影，先验证平面/两层药盒的 RGB-D 估计。
+  3. 在低速空夹爪/单物体验证后，再确认多层堆叠、盘沿避让和退出路径。
+参数：arm.place_height_mode: stack_rgbd，place_support_z_m: null，
+place_object_bottom_offset_m: 实测值，place_support_footprint_m: 覆盖物体的尺寸。
+校验不允许缺失偏移时启用，不从不确定深度/尺寸猜测低位释放。
+当前点云模块是支撑面估计；它还不是完整堆叠稳定性/承重规划、场景碰撞模型或
+带持物体积的 Cartesian 轨迹检查。下一轮应加入物体几何估计/绑定和堆叠场景体积。
+
+三、恢复
+已有遮挡关系图、清障预算、同会话重规划保留在 template 模式。
+新增 --grasp_planning_retry_attempts 0|1|2，默认 1：只有明确 grasp_pose_not_found
+时刷新观察和候选再试；耗尽后禁止外层整任务重跑放大预算。
+MotionError/GripperError 在运行器捕获，保存：失败动作、已完成前缀、运动日志、
+抓取/放置阶段、是否已经释放、持物是否确定；停止自动重规划。
+放置失败不再无条件回 home；可能持物时保留原人工夹爪处理会话。
+不能把“记录进度”当作“可自动重放前缀”。异常时先核实持物、姿态、场景再恢复。
+CaP 保留技能内部的限次感知恢复/几何清障；不运行外层整任务重规划或旧的跨动作图
+自动重放，避免模型策略与另一个重规划器重复操纵已完成物体。
+
+四、流水线与实验
+已有首帧目标感知/抓取候选后台预计算与容器预观察重叠、模型缓存、场景版本检查。
+当前新增的是可比较的策略入口和恢复，不声称已经缩短实机总时间。
+下一批值得做的性能改进：
+  A. 复用一次 RGB-D 和 SAM 分割给身份识别/几何/抓取，按图像哈希和场景版本去重。
+  B. 将抓取前候选 IK 批量预筛排入空闲 CPU；执行时仍从真实状态重规划。
+  C. 堆叠刷新只保留必要复拍，减少重复回 home；只在证明视野与持物不冲突后重叠。
+  D. 使 GPU 推理队列可观测，区分排队/推理；不在同一 GPU 无限制并发。
+  E. 将瓶颈分成冷启动、感知、模型生成、ROS 请求、规划、运动、人工等待。
+不能跨场景变化复用旧抓取轨迹；不能以减少碰撞检查或重试预算换取速度。
+
+建议消融矩阵：template vs cap；流水线开/关；规划重试 0/1；
+固定高度 vs 已标定的 stack_rgbd（固定高度只作为受控实验对照）；同模型/权重/
+标定/对象/布局/速度/随机种子/验证标准。报告完成率、抓取与放置成功率、
+干预次数、恢复成功率、真实释放间隙、总墙钟和各阶段时间。
+task_timing.json 已记录 policy_backend、流水线开关、重试预算、请求速度。
+嵌套/并行阶段不能直接相加。每次实验使用独立 plan_json、plan_md、generated_code、
+failure_report_path、simple_memory_path 路径，避免 current_plan 覆盖历史。
+
+五、已验证
+离线单元测试覆盖反馈分支、辅助函数生成、禁止代码、预算、任务绑定/重复执行拦截、
+全部放置阶段故障、速度恢复、支撑深度缺失/不平整、工具进入支撑面的拒绝、
+缓存绑定、限次感知恢复、硬件异常进度报告和失败放置不回 home。
+本地 Qwen 两目标策略生成与无设备解释通过；正式 run_fr3_agent.sh 的单目标
+--policy_backend cap --no_run_executor 通过（cap_cli_smoke 目录）。
+本轮不自动执行实机运动、故障复位、夹爪开合。实机结果仍待分阶段验收。
+备份：runs/restoration/20261105/before-gentle-place-recovery/

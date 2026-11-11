@@ -96,7 +96,8 @@ class AnyGraspFR3Tests(unittest.TestCase):
                 self.assertIn('compat_libs', kwargs['env']['LD_LIBRARY_PATH'])
                 request = json.loads(Path(command[-1]).read_text())
                 self.assertTrue(request['collision_detection'])
-                self.assertFalse(request['grasp_table_clearance_check'])
+                self.assertEqual(request['grasp_table_clearance_check'],
+                                 self.workcell.get('grasp_table_clearance_check', True))
                 self.assertTrue(request['export_filtered_candidates'])
                 np.testing.assert_array_equal(np.load(request['target_mask_path']), mask)
                 self.assertIn(b'element vertex 400', (Path(request['capture_dir']) / 'scene.ply').read_bytes())

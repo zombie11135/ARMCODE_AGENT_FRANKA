@@ -1,0 +1,56 @@
+AnyGrasp 接回状态：2026-11-11
+==========================
+
+配置已切回 AnyGrasp；相机仍为 1280x720，fps=6。
+AnyGrasp 初始化时设置 max_gripper_width=0.085 m，不是仅在推理后裁剪。
+新检测权重与原本地权重 SHA-256 一致，复用同一份权重；tracking 权重本次不用。
+新 SDK：/home/wpy/armcode-runtime/anygrasp_sdk_20261111/grasp_detection
+Python：/home/wpy/armcode-runtime/grasp/bin/python （3.11.5）
+官方仓库提交：b8eaafc9eca7babd5208e7a5ade3c561060be4c5
+
+官方 2026-07-04 更新了授权机制和推理 API：
+https://github.com/graspnet/anygrasp_sdk/blob/main/README.md
+https://github.com/graspnet/anygrasp_sdk/blob/main/grasp_detection/USAGE.md
+新 SDK 用 create_detector(config)、get_grasp(points, optional_params)。
+hardware/anygrasp_sdk.py 提供旧、新 API 的小型适配器；worker 和离线回放共用。
+保留全场景点云、SDK 碰撞检测、SAM/ROI 后筛选和原 FR3 坐标变换。
+未增加 NMS、裁剪输入点云或修改机械臂/夹爪控制。
+新版不支持旧 apply_object_mask=False；当前始终为 True，使用新版默认物体过滤。
+可选 top_down 以新版示例的相机 +Z、30 度接近锥实现；当前为 False，不影响此次设置。
+services/anygrasp_fr3_service.py 不再要求新版已移除的 lib_cxx.so。
+旧 SDK 的原授权已经恢复，完整回退配置/授权备份：
+/home/wpy/armcode-runtime/backups/anygrasp-20261111-142850-632991
+
+当前阻塞：授权不匹配，尚未生成任何 AnyGrasp 抓取候选。
+下载授权：/home/wpy/下载/license_XuanhaoXiang.zip
+授权绑定：N77573974399562487318
+当前主机：N84989114316637315928
+用户在普通终端独立核对也是 N84989114316637315928。
+原注册目录 /home/wpy/anygrasp-license-sdk/license_registration/gsnet.so 与新 SDK
+的 Python 3.11 二进制 SHA-256 相同，原工具如今也返回 N849…。
+因此当前 mismatch 不是本次更换该二进制版本造成的，也不是只在沙箱出现。
+用户确认此前查询过 N775…；目前没有当时完整网卡状态，不能断言申请填错或准确原因。
+SDK 报错显示会通过 ifconfig 采集 MAC；网卡集合/状态变化是待核对线索。
+官方仓库有重启后编号变化的用户报告，但不是维护者提供的根因结论：
+https://github.com/graspnet/anygrasp_sdk/issues/169
+未修改网卡、Docker、MAC、机器编号或签名许可内容。
+
+普通终端核对命令（只查授权，不连接机器人）：
+  cd /home/wpy/armcode-runtime/anygrasp_sdk_20261111/grasp_detection
+  /home/wpy/armcode-runtime/grasp/bin/python -c 'from gsnet import get_feature_id, check_license; print(get_feature_id()); print(check_license("license"))'
+
+后续需将上述两个编号和同一机器编号变化的情况交给授权提供方核对稳定绑定/重签。
+不要只编辑 licenseCfg.json 的 feature_id；该字段属于签名授权的一部分。
+在 check_license 返回 True 之前，不能宣称 AnyGrasp 模型已恢复或开始真机基线。
+
+本轮证据：
+runs/anygrasp_restore/20261111-142850-632991/license_diagnostic.json
+runs/anygrasp_restore/20261111-142850-632991/inference_new_sdk.log
+同目录保存原请求、新 SDK 请求、初次旧 SDK 失败日志和恢复 manifest。
+输入来自真实保存的 1280x720 场景，本轮仅离线使用，不重新拍摄、不执行动作。
+新接口、旧接口兼容、宽度/碰撞参数传递、空候选、后端路由及计时测试：30 passed。
+实际 SDK Python 环境 GraspGroup 空候选形状为 (0,17)，NumPy=1.23.5。
+测试通过不代表当前授权通过；新 worker 明确返回初始化失败。
+
+授权通过后使用独立实验标签，例如 fr3_two_object_anygrasp_v1，
+不要与此前 GraspNet-baseline 试验合并统计；仍需重新拍摄现场进行首轮验证。

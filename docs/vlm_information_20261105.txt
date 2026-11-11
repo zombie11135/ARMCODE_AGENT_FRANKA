@@ -1,0 +1,79 @@
+VLM 碎片辅助与任务信息状态（2026-11-05）
+
+目的
+让 agent 看到当前还缺哪些证据、哪些动作可能补充证据，并在新观测到来后记录实际变化。
+本轮仅使用保存帧、离线测试和本地模型，没有连接设备或执行机械臂/夹爪动作。
+
+实现位置
+services/vlm_fragment_advisor.py：同一原图和两个未经标注的 RGB 裁剪，判断 same_object / different_objects / uncertain。
+perception_v2/fragment_association.py：几何候选通过深度/遮挡间隙检查而 SAM3 双向验证未通过时，调用 VLM 辅助。
+perception_v2/instance_resolution.py：保留旧的完整模型掩膜关联，标记哪些候选已被该路径处理。
+services/wrist_occlusion_service.py、runtime/services.py：接入腕部感知，复用配置的规划 VLM；固定辅助相机不重复请求。
+runtime/information_state.py：证据指标、观测增量、动作机会描述和日志。
+skill_lib/actions/observation_cache.py：在实际观测发布（包含流水线发布）时更新信息状态。
+skill_lib/simple_actions.py：沿用原来的相机/场景失效通知，使运动后的旧信息失效。
+agents/occlusion_recovery_planner.py：恢复快照和提示词加入缺失证据、碎片假设与动作信息机会。
+agents/information_plan.py：计划保存动作前指标和动作后评估要求。
+agents/hybrid_execution.py：task_state.json 的 scene.task_information 保存当前各目标的信息状态。
+
+信息分数定义与边界
+首版是任务相关的抓取前证据指标，不是全场景真实可见比例、概率、熵或经过学习的价值函数。
+Q = 40 L + 30 D + 30 R，范围 0..100。
+L：当前任务目标是否成功对应到一个图节点（0/1）。
+D：目标掩膜内有有效深度的像素比例；目标未定位时为 unknown，计分时暂计 0。
+R：现有几何检查是否返回 no_occlusion_evidence（0/1）；目标未定位时为 unknown。
+未知项显式存储为 null / unknown_components，不把未知当成物体不存在。
+权重 40/30/30 是可解释的初始启发式，没有数据校准，不能作为成功率报告。
+场景实例数、可能遮挡边数、未解决碎片候选数另外记录；不会因为识别物体更多而自动涨分。
+目标未定位时 Q 可以一直为 0，但场景结构和可选探索动作仍在更新；Q=0 不表示任务无解。
+next_stage 复用现有几何检查选择 information_acquisition 或 grasp_planning，不新增深度覆盖比例门槛。
+即使 Q 接近 100，也只是支持进入抓取规划：IK/碰撞、抓持确认、目的地堆叠表面、放置验证仍未检查。
+task_completion_ready 当前保持 false；这一版尚未实现覆盖抓取到放置全过程的统一就绪评分。
+
+动作与信息变化
+观测前不假定信息增加。动作使旧观测失效后，valid=false；历史值保留，不能当当前证据使用。
+新观测发布后计算 delta_Q=Q_after-Q_before；同目标比较，可为正、零、负。
+同一报告重复发布不新增进展日志；同场景重复拍照可能仍为 0。
+帧间的变化不自动解释为某个动作的因果效果；误检、视角和深度噪声也能改变测量。
+清障动作记录直接可揭示节点、可达分支数和搬运成本类别；观测记录原位补拍/换视角。
+expected_score_gain 目前为 null，不凭分支数伪造未来加多少分，也不声称 Shannon 信息增益。
+现有恢复预算和原位补拍限制继续生效。没有实体身份仍可探索，目标抓取前的身份检查继续生效。
+
+VLM 使用方式
+仅对现有几何候选中的歧义调用，每帧最多 3 对；每次远程请求超时上限 15 秒。
+返回的关系仅存入 vlm_advice 和恢复快照 fragment_hypotheses，不能直接合并掩膜、改变分割置信度或触发运动。
+已有几何完整掩膜关联不被 VLM 的不同物体判断推翻；已经由该路径处理的候选不重复列为未解决。
+同 scope/scene_epoch 且原图像素与掩膜均相同时复用意见，缓存最多 32 条；不声称复用是新的独立证据。
+模型失败或格式错误记录为 unavailable/uncertain，不丢弃已有 RGB-D 结果。
+这种保守的辅助接入用于验证语义线索是否有用，本轮没有实现 VLM 自动实例合并。
+
+启用与消融
+原有 hybrid + enable_geometry_occlusion 启动方式继续使用，配置了 planner_llm_base_url/model 时默认启用 VLM 辅助。
+--disable_vlm_fragment_assistance：只关闭 VLM，保留 SAM3 双向验证与几何分支。
+--disable_fragment_association：关闭双向验证及依赖该候选流程的 VLM 辅助；保留更早的几何实例筛选。
+信息状态本身为轻量计算，不增加网络请求，也不创建相机或运动服务。
+运行时 information_trace.jsonl 与 nesyro_gate_trace_path 位于同一目录；information_plan.json 包含 information_before。
+
+真实保存帧验证
+实验目录 runs/experiments/vlm_information_20261105/。
+replay/：五帧 RGB-D 重放，先使用原图+像素坐标版本；三个复杂帧各做有/无新字段的恢复提示对照。
+三个复杂帧仍未定位西瓜霜，Q=0；均输出 plan_clear，加入信息字段后所选节点没有改变。
+frame_00 仍选择新版 N6 蓝色方块，预期揭示 N5 和 N7；这只是待执行计划，buffer 尚未配置。
+另两帧为较早的已识别西瓜霜场景，Q 约 99.21、99.65，处于 grasp_planning；识别证据路径写入 summary.json。
+五帧不是同一次搬运前后的轨迹，不能将相邻帧的分数差解释为实测动作收益。
+实例数保持 10/13/13/7/9，新增双向关联 0，旧几何成功关联保留 1。没有证实关联效果提升。
+几何候选在另外两个复杂帧为空，所以当前 VLM 路径也未覆盖那两帧的潜在关联。
+
+crop_probe/：最终原图+局部裁剪方式对原编号 N5/N7、N0/N1、N6/N7 的额外诊断。
+N5/N7（用户确认同物体）仍被误判不同；N0/N1 判断不同；N6/N7 仍被误判同物体。
+模型理由把蓝色方块当成药盒或药盒一部分，说明局部定位和物体关系推理仍不可靠。
+这些是同一帧的少量诊断，不能计算总体性能；没有把正负答案写进提示词。
+service_smoke/：最终裁剪版本走真实 WristOcclusionService 全流程，含实际 SAM3 分割和本地 Qwen，请求/报告留档。
+它保留了正确的旧几何合并，VLM 错误意见没有更改掩膜。
+
+验证与后续实验
+新增测试覆盖不虚增分、负增益、目标未知、部分深度不新增门槛、动作失效、发布接线、配置消融、
+VLM 误判不合并、深度矛盾不询问模型、精确缓存与失效、异常输入和原始裁剪像素。
+验证结果见同目录 validation.json 和 core.log。
+下一阶段应采集真实同任务“观测→清障/换视角→观测”序列，人工标注关联和目标揭示效果，
+再估计各动作的信息收益/成本，校准权重；此轮尚未执行这一实体实验。

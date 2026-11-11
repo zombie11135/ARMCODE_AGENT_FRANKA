@@ -1,0 +1,113 @@
+2026-11-05：InstructFlow 子任务图 + CaP 策略执行、流水线与复杂遮挡
+
+本轮实现范围
+新增 --policy_backend hybrid。当前以任务图中有序的 grasp/place 对作为一个子任务，
+不是任意技能图执行器。使用原机械臂、夹爪、感知、几何清障和放置技能。
+遮挡关系扩展已接入原分析链路，template/cap/hybrid 均可使用。
+代码策略、节点恢复和代码预生成通过 hybrid 启用；template/cap 对照入口保留。
+
+一、主要代码位置
+agents/hybrid_execution.py
+  按图绑定子任务；每个程序只处理当前物体/容器。执行结果进入反馈，失败约束
+  注入当前抓取节点，再为当前子任务重新生成代码。已完成抓放对不重放。
+  后台单工作线程预生成下一个节点的程序，前台独占机器人与状态写入。
+  图修订后废弃旧预生成结果；每次生成使用独立 node_NNN_rN.py 文件。
+  提示词只传当前子目标；实测发现传完整全局目标会导致小模型把后续目标也写入
+  当前节点，现已修正。代码生成仍通过已有 CaP AST 解释器执行。
+
+runtime/task_state.py
+  共享已完成动作、节点状态、修复预算、持物状态、场景版本和最新失败反馈。
+  同时记录既有清障计数、几何观察次数、缓冲槽位占用，不在重规划时归零。
+  恢复路由：refresh / graph_repair / code_repair / stop。
+
+agents/simple_execution_runtime.py
+  接入共享状态和 hybrid。失败报告增加动作阶段、物理进度和恢复路由。
+  hybrid 不再叠加原抓取重试、旧同会话整图动作重放和外层整任务重规划。
+  当前节点修复使用 --max_replan_attempts，默认每节点最多 1 次；策略观察预算
+  为每节点 2 + max_replan_attempts。原几何清障/换视角预算继续独立计数且跨尝试保持。
+  template/cap 的 --grasp_planning_retry_attempts 语义保持不变。
+
+agents/cap_code_generator.py / agents/simple_agent_system.py
+  代码生成接收当前节点约束及上一次失败反馈。
+  正常执行前生成首节点，之后按需预生成；--no_run_executor 会生成全部子任务
+  供离线审查，不启动执行会话。
+
+二、流水线
+原有首帧感知/候选预计算与容器预观察的重叠继续使用。
+新增的是“当前子任务执行期间，预生成下一子任务代码”，后台不捕获相机、不控制
+机械臂、不生成可直接复用的真实运动轨迹。
+代码结果绑定任务图修订号，视觉/抓取缓存仍沿用原场景 epoch 和捕获位姿检查。
+--disable_policy_pipeline：仅关闭新代码预生成。
+--disable_perception_pipeline：关闭原首帧感知预计算。
+两种开关分别记入 task_timing.json，hybrid_trace.json 记录预生成启动、使用、
+失败和失效。尚未测量实机吞吐提升，不能把离线验证当作加速结论。
+
+三、错误恢复
+明确的无候选/观察失败：刷新观察，反馈约束，重新生成当前子任务。
+Gate 请求修复：约束进入当前图节点，再生成当前子任务；既有几何清障循环负责
+每次搬开一个合格遮挡物、重新观察和重新评估关系。
+未启用清障、清障预算耗尽、缓冲槽位不足等，不由模型擅自打开功能或补造坐标。
+运动已经发生、开爪/持物状态不明、释放后撤离失败：结束自动恢复，保留物理进度。
+硬件 MotionError/GripperError 保持由原外层硬件会话清理与状态报告处理。
+成功抓放后发生策略代码错误，也不会重复这一对已完成动作。
+当前没有实现自动故障复位、跨程序重启后无条件恢复持物任务，也没有任意修改
+任务顺序或自动生成新机器人控制接口。
+
+四、遮挡关系算法
+occlusion_reasoning/collective.py + relations.py
+  多个物体分别侵入同一目标的可补全部分时，聚合互不重叠的贡献。
+  即使每个贡献低于原面积比例门限，只要共同证据充分，仍能形成共同遮挡组。
+  每个成员仍需有实测局部深度方向和邻接证据；缺失深度不参与投票。
+  混合深度方向按空间区域保留，不把上下两段相反的关系平均成一个全局方向。
+
+occlusion_reasoning/planar.py
+  可见平面延拓分支同样支持多个小遮挡物的累计证据，保留各自来源和面积。
+  原凸形/平面延拓假设仍存在；这是候选关系，不是完整隐藏形状的重建。
+
+occlusion_reasoning/structure.py
+  汇总目标的直接遮挡物、间接依赖、共同前置物、分层清理顺序与环路冲突。
+  A→B→目标表示清障依赖，不伪造一条“A直接遮挡目标”的观测边。
+  清障根节点优先考虑对目标依赖分支的覆盖，再参考关系证据与检测分数。
+  有腕部标定时，将实测点云转到 fr3_link0，描述 XY 投影重合且高度分离的
+  possible_stack_above 关系；这不证明物理接触或承重，不单独授权清障动作。
+
+services/wrist_occlusion_service.py / agents/occlusion_recovery_planner.py
+  新结构进入分析报告、遮挡物选择和 LLM 恢复快照。
+  与目标有关的局部交错遮挡证据进入补充观察路径，不直接选一个全局方向清障。
+  未新增可视化窗口、检测模型或整套异常吞掉后继续执行的兜底逻辑。
+
+五、运行方式
+只生成、检查两个子任务：
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash run_fr3_agent.sh --simple_actions --local_vlm qwen3vl-8b-awq \
+    --use_llm_planner --policy_backend hybrid --no_run_executor \
+    --goal '将西瓜霜放到蓝色盘子中，再将抗病毒口服液放到粉色盘子中'
+
+实机测试时，在原已确认的实机启动命令中添加 --policy_backend hybrid。
+遮挡关系分析仍使用 --enable_geometry_occlusion；自动清障仍需要原有清障开关、
+已核实的空闲缓冲位姿及清障预算。没有默认替用户打开自动搬移遮挡物。
+本轮没有改变上一轮堆叠放置的标定要求：stack_rgbd 自动降低释放高度仍未启用。
+
+主要输出（plan_json 同目录）：
+  task_state.json：节点、动作、持物、预算、场景版本。
+  hybrid_graph.json：执行进度；replan_json 指向约束修复图。
+  hybrid_trace.json：节点完成、恢复和预生成事件。
+  failure_report.json：保留失败证据，包括后来恢复成功前的失败；结合节点状态和
+    task_timing.json 判定最终任务结果，不把文件存在本身视为本轮最终失败。
+  generated_code 同目录的 *_nodes/：各节点各版本源码及 .cap.json 生成记录。
+
+六、验证与边界
+核心离线回归：698 passed, 2 skipped。
+新增测试：9 项复杂关系测试、16 项 hybrid/恢复测试。
+本地 Qwen：正式 CLI 两子任务纯规划通过。
+真实本地 Qwen + 注入技能结果：首目标模拟无候选 → 反馈约束 → 修复一次 → 首目标
+成功 → 次目标成功；尝试顺序 A,A,B，没有重放已完成目标。未构造硬件对象。
+真实 RGB-D 重放：3 份近期记录、3 份有遮挡记录，输出位于
+runs/restoration/20261105/complex_occlusion_replay/。有遮挡记录保持边界关系，
+两份记录得到局部深度区域描述。该重放没有人工真值，不能据此宣称识别率提升。
+复杂共同遮挡/多层依赖目前通过合成场景测试，需补充实机新布局做准确率评估。
+完全不可见且没有历史观测的物体仍不能凭单帧可靠定位；上下层关系不等于接触关系。
+
+备份：runs/restoration/20261105/before-hybrid-complex-occlusion/
+本地模型生成：runs/restoration/20261105/hybrid_cli_smoke/
+恢复闭环：runs/restoration/20261105/hybrid_recovery_smoke/

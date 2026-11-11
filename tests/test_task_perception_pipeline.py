@@ -1,6 +1,7 @@
 """Pipeline overlap and cache correctness with saved arrays and fake devices."""
 from copy import deepcopy
 import json
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -26,8 +27,11 @@ def launch(rig, captured=None, enabled=True):
 
 
 @pytest.mark.parametrize('occluded', [False, True])
-def test_saved_frame_analysis_overlaps_container_movement_and_owner_publishes(rig, monkeypatch, occluded):
+@pytest.mark.parametrize('use_sam_for_grasp', [False, True])
+def test_saved_frame_analysis_overlaps_container_movement_and_owner_publishes(
+        rig, monkeypatch, occluded, use_sam_for_grasp):
     rig.camera.stage = 0 if occluded else 1
+    rig.robot.config.use_sam_for_grasp = use_sam_for_grasp
     owner = threading.get_ident()
     started, moving = threading.Event(), threading.Event()
     predict = rig.service.backend.predict
@@ -58,6 +62,16 @@ def test_saved_frame_analysis_overlaps_container_movement_and_owner_publishes(ri
         assert rig.camera.count == 2  # Home snapshot plus foreground container capture.
         monkeypatch.setattr(rig.service.backend, 'predict', predict)
         assert prepare_grasp(rig.robot, 'target').success
+        prepared = rig.robot.observations['target']['result']
+        assert not prepared['selected_instance'].get('mask_npy_path')
+        graph = prepared['geometry_occlusion']
+        target_node = next(node for node in graph['primary']['relation_graph']['nodes']
+                           if node['node_id'] == graph['target_association']['node_id'])
+        result = rig.robot.grasp('target')
+        assert result.success, result.error
+        assert rig.plans[-1]['mask_npy_path'] == target_node['visible_mask_path']
+        assert rig.plans[-1]['bbox'] == target_node['bbox_xyxy']
+        assert rig.plans[-1]['color_path'] == prepared['geometry_capture']['color_path']
         assert rig.camera.count == 2 + int(occluded)  # Only clear requires a new frame.
         assert [e[0] for e in rig.events].count('clear') == int(occluded)
         assert [e[0] for e in rig.events].count('recognize') == 1 + int(occluded)
@@ -178,6 +192,7 @@ def test_full_runtime_launches_pipeline_before_containers_and_consumes_before_ac
     rig.camera.start = Mock()
     config = SimpleAgentSystemConfig(goal='offline pipeline', execute_robot=True,
         disable_grip=True, camera_warmup_s=0, enable_geometry_occlusion=True,
+        plan_json=str(rig.root/'plan.json'),
         nesyro_gate_trace_path=str(rig.root/'gate.jsonl'),
         simple_memory_path=str(rig.root/'memory.json'))
     runtime = SimpleExecutionRuntime(config)
@@ -196,6 +211,13 @@ def test_full_runtime_launches_pipeline_before_containers_and_consumes_before_ac
     report = json.loads((rig.root/'perception_pipeline.json').read_text())
     assert report['status'] == 'published'
     assert rig.camera.count == 2
+    timing = json.loads((rig.root/'task_timing.json').read_text())
+    spans = timing['spans']
+    assert timing['status'] == 'ok' and timing['metadata']['execute_robot']
+    assert any(s['name'] == '首帧后台感知总计' and s['background'] for s in spans)
+    assert any(s['name'] == '等待后台感知结果' and not s['background'] for s in spans)
+    assert any(s['name'] == '容器预观测总计' for s in spans)
+    assert Path(timing['history_path']).is_file()
 
 
 @pytest.fixture

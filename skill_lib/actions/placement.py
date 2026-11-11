@@ -28,21 +28,37 @@ def place(robot: SimpleRobotActions, container: str) -> SkillResult:
             return result
 
     plan = robot._offset_place_plan(robot.place_plans[key], robot.place_counts.get(key, 0))
-    robot.place_counts[key] = robot.place_counts.get(key, 0) + 1
+    arm = getattr(robot.context, 'arm', None)
+    gentle = getattr(getattr(arm, 'config', None), 'gentle_place_enabled', False) is True
+    if gentle:
+        from hardware.gentle_place import prepare_place_plan
+        try:
+            plan = prepare_place_plan(plan, arm.config)
+        except ValueError as error:
+            return SkillResult(False, data=dict(failure_type='place_geometry_unverified',
+                               automatic_replan=False), error=str(error))
 
     if not cfg.execute:
+        robot.place_counts[key] = robot.place_counts.get(key, 0) + 1
         return SkillResult(success=True, data={"place_plan": plan, "dry_run": True})
 
     execution = robot._execute_cached_place(plan)
+    if execution.get('success') or execution.get('released'):
+        robot.place_counts[key] = robot.place_counts.get(key, 0) + 1
     return SkillResult(
         success=bool(execution.get("success")),
-        data={"place_plan": plan, "execution": execution},
+        data={"place_plan": plan, "execution": execution,
+              **({"automatic_replan": False, "holding_state": "unknown"}
+                 if not execution.get("success") else {})},
         error=None if execution.get("success") else execution.get("error"),
     )
 
 
 @scene_mutation('place')
 def _execute_cached_place(robot: SimpleRobotActions, place_plan: Dict[str, Any]) -> Dict[str, Any]:
+    if place_plan.get('gentle_place'):
+        from hardware.gentle_place import execute_place
+        return execute_place(robot.context, place_plan, robot.gripper_open)
     for label, pose in [
         ("approach", place_plan["approach_pose_mmrad"]),
         ("place", place_plan["place_pose_mmrad"]),

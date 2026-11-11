@@ -1,0 +1,130 @@
+FR3 双物体全阶段计时基线（2026-11-11）
+====================================
+
+本轮状态
+
+用户确认：西瓜霜 -> 蓝色盘子，抗病毒口服液 -> 粉色盘子。
+用户选择先完成计时准备，稍后摆放；本轮未启动真实抓放，没有真机统计结果。
+AnyGrasp 授权仍在申请，用户允许先用现有 GraspNet-baseline。配置未切换。
+不要用仿真、测试时钟或旧日志填充这轮基线。AnyGrasp 可用后应另开实验组。
+
+计时边界（全部秒，使用单调时钟）
+
+CAPTURE：校准腕相机获取新 RGB-D 帧，包括等新帧、图像/点云准备和落盘。
+  相机持续流式采集，不能把它称为单次传感器曝光时间。缓存命中不伪装成采集。
+  获取拍摄前后 FK、相机启动预热、最终冻结文件另在原始跨度中，不属于 CAPTURE。
+PERCEIVE：目标身份识别、SAM/遮挡关系、容器识别及坐标计算。同类重叠跨度取并集。
+GRASP_PLAN：抓取候选服务，包括 GPU 锁等待、模型进程初始化、推理与候选筛选/IO。
+  明确记录实际 backend 和 inference_cache_hit。不是只测一次 CUDA 前向推理。
+  后续机械臂 IK 和 MoveIt 轨迹计算不算进这个阶段。
+MOTION_PLAN：现有 /plan_kinematic_path 规划服务调用墙钟，包含服务可用性等待及通信。
+  同时保留 response.motion_plan_response.planning_time 为 server_planning_s；
+  该字段是服务端自报规划时间，与主机测得服务耗时分别使用。
+  FR3规划准备总计另记：涵盖硬件/场景状态检查、IK、候选检查、MoveIt、路径审查。
+  不要将 prepare 总计或“机械臂调用(move)”误当纯规划时间。
+MOVE：现有 FollowJointTrajectory 目标被接受后，等待终态结果的墙钟。
+  包括控制器实际执行和结果通知延迟；不含控制器激活、目标握手、末端验收与清理。
+  这是控制器执行接口的测量边界，不是按关节速度阈值测得的严格运动起止。
+  未发送/未接受目标不会产生 MOVE；超时/中断记录已等待区间并标为 error，
+  原有取消/停控/清理照常运行，清理耗时仍在 RPC/TOTAL 中。
+GRIPPER：原夹爪开/合回调及完成反馈等待；不把启动会话当开合。
+VERIFY：真正调用抓取/放置验证技能的时间。跳过验证不会填一个假的成功验证。
+  原控制策略可能接受低置信度“未确认”；现在不更改它。
+  验证技能失败与整体任务返回成功可同时出现，需检查 failed_calls 和原始证据。
+  不把 FR3 末端到位验收当作物品已进盘的验证。
+HANDOFF：上一个成功控制器执行区间结束，到下一个控制器执行区间开始。
+  采用上述 MOVE 接口边界，是运动衔接间隔估计；包含期间规划、感知、夹爪等，
+  与那些阶段重叠。不是只表示 CPU 空闲，不含首段运动前/末段运动后时间。
+  使用同一 boot ID + time namespace 的时钟。无法对齐、前段失败、
+  中间运动请求丢失遥测时不编造间隔。
+TOTAL：现有任务入口到返回/异常的墙钟。保留加载、清理、恢复、人工预览等待。
+  不含交互输入任务前的等待，也不含入口之前启动 VLM 的时间。
+
+原始 spans 和 summary 保留；新增 phases、recovery_events、phase_schema。
+每阶段 wall_s 是本阶段跨度并集；work_s 是调用耗时之和。
+不同阶段仍可重叠，不得累加来替代 TOTAL。未观测值是 null，不是 0。
+跨进程时钟无法对齐时仅保留 work_s 和原始相对本进程的时间，不伪造 wall_s/HANDOFF。
+成功/失败是现有软件控制逻辑的结果，独立物理成功仍需实验者检查。
+恢复事件记录原有抓取规划重试、二次观察重试、Hybrid 节点修复、任务重规划；
+数量是这些层级的事件数，不等于整条任务从头重跑次数，也不包括 MoveIt 内部搜索次数。
+规划器内部规划/候选失败仍在 MOTION_PLAN failed_calls 和原 ROS 日志中。
+
+新增/变更位置
+
+runtime/timing.py：任务条件标签、硬件配置与摘要、worker 遥测接入、阶段与 CSV 导出。
+runtime/experiment_timing.py：阶段汇总、HANDOFF、成功/失败/恢复分组、均值/P50/P90。
+hardware/fr3_worker.py：只包装现有 Session.call/wait/prepare；未修改外部 real_ptp.py。
+hardware/fr3.py：把 worker 遥测附到当前请求/任务，异常前也会保存。
+hardware/agent_camera.py：给原新帧获取代码块加计时上下文，不改变等帧逻辑。
+验证技能、现有重试入口、放置流程：仅加时间和状态/目标标签。
+scripts/run_fr3_timing_trial.sh：一次一个独立试验目录；沿用 run_fr3_agent.sh。
+
+首轮（摆放完成后由操作者启动）
+
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash scripts/run_fr3_timing_trial.sh pilot01 --execute_robot --verify_place_vdm
+
+脚本默认保持现有速度/安全/预览/恢复/流水线设置，不启用 PMIR 新调度。
+只有显式 --execute_robot 才运动。--verify_place_vdm 在这一实验命令中启用原有
+放置验证技能，以便实际测 VERIFY；抓取即时验证仍维持原默认，未开启。
+这个额外验证选项是实验协议的一部分，不改原校验阈值或失败处理。
+预览保持原默认，关闭预览窗口的人工等待有独立 span，并包含在 TOTAL 中。
+若以后统一改为 --no-visualize-selected-grasp，应建立新实验标签，勿混算。
+此脚本默认 policy_backend=template，即原指令图+模板技能路径。
+要测 Hybrid 节点代码生成，用同一命令追加 --policy_backend hybrid 并换实验标签；
+不要把当前模板基线宣称为通用 CaP/PMIR 已接入真机。
+
+首次通过后，将每次布局、容器位置、速度、相机模式和选项保持一致。
+每次人工复位物体、确认实物结果后单独运行 trial01、trial02 ... trial20，
+不要自动循环 20 次，也不要在失败后自动从头重抓已完成物体。
+每次新进程：感知模型初始化计入 TOTAL；本地 VLM 可以保持同一已启动实例。
+不要混算进程冷启动、同进程暖启动、不同布局、不同模型与不同预览策略。
+建议 pilot 使用独立标签，正式组用下面标签，防止把调试轮混入 10–20 次。
+
+  export ARMCODE_TIMING_EXPERIMENT=fr3_two_object_graspnet_v1
+  export ARMCODE_TIMING_LAYOUT=table_v1
+  bash scripts/run_fr3_timing_trial.sh trial01 --execute_robot --verify_place_vdm
+
+输出目录会在启动时打印，例如 runs/fr3-timing-trial01-XXXXXXXX/。
+各轮 task_timing.json、timing/<run_id>.json、timing/<run_id>.csv 永久保留；
+计划、生成代码、失败与执行记忆也按本轮目录隔离。
+记录实验者观察的物理成功/失败、布局照片、重摆/预览/中断情况作为实验原始备注。
+未经真机首轮通过，不把离线回归测试作为抓放成功证据。
+
+汇总（默认仅收 execute_robot=true 且 real 硬件配置的任务，仍包括真实任务早期失败）
+
+  .venv-mobileclip2-fr3/bin/python -m runtime.experiment_timing runs \
+    --experiment fr3_two_object_graspnet_v1 \
+    --output runs/experiments/fr3_two_object_graspnet_v1
+
+生成 baseline.json、trials.csv、summary.csv。
+按目标、布局、硬件配置摘要、项目 Python 源码摘要和运行选项分条件组；每组再按 ok/failed/error/interrupted
+以及是否观察到恢复事件分组。不同配置不混成一个平均值。run_id 去重。
+mean/P50/P90 基于每轮阶段 wall_s；分位数采用线性插值，missing 不填 0。
+failed/error 组的耗时可能是不完整任务的前缀，不能与完整成功组等价比较。
+建议至少 10–20 轮正式任务后再讨论 P90；当前无真实样本，不给优化收益数值。
+
+后续 PMIR 分析
+
+先读 MOVE/HANDOFF 的原始区间，再检查对应 PERCEIVE/GRASP_PLAN/MOTION_PLAN
+的输入帧、场景 epoch、起始关节状态是否依赖当次物理结果。
+腕相机新帧依赖静止/稳定观测位；下一运动规划依赖当前实际起点，不能只凭耗时提前提交。
+仅模型计算较长不证明可以并行：还需核对 GPU 锁等待、缓存有效性与场景变化后再验证。
+本轮不修改执行依赖或物理提交顺序。
+
+本轮准备验证
+
+计时/阶段导出/控制/恢复相关 126 项离线测试通过。扩展加入变换测试后总计
+140 passed、2 failed。两项失败仍硬编码 0.16 m 的旧工具偏移；当前标定文件
+注明 2026-10-23 用户要求改为 0.15 m，docs/fr3_agent.txt 也记录 150 mm。
+本轮未修改这些测试或标定，不能把扩展测试称为全部通过。
+离线路径预检通过：graspnet_baseline、real、arm.speed_scaling=0.20；未打开设备。
+新启动脚本用假的 agent 入口验证了默认不追加 --execute_robot、每轮目录独立。
+尚未验证真实 Docker 中的计时遥测、相机抓放或真实耗时分布。
+
+2026-11-11 后续：用户要求切回 AnyGrasp
+
+当前配置已切换为 anygrasp + 新版 SDK，宽度 0.085 m、分辨率 1280x720。
+但是提供的新授权与当前机器 feature ID 不匹配，实际推理尚未通过。
+见 docs/anygrasp_restore_20261111.txt；此状态覆盖本文开头当时的 GraspNet 配置说明。
+请勿在授权通过前重跑真机任务；后续成功试验使用新的 AnyGrasp 实验标签。

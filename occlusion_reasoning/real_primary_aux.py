@@ -66,7 +66,9 @@ def load_candidates(capture_dir, analysis_dir, camera):
         rows = {p['source_id']: p for p in _read(directory/'segmentation_report.json')['proposals']}
         if len(rows) != len(packet['proposals']) or set(rows) != {p['source_id'] for p in packet['proposals']}:
             raise ValueError('Segmentation proposal IDs differ from observation')
-        candidates = [dict(rows[p['source_id']], mask=stored[p['raw_mask_key']].copy())
+        candidates = [dict(rows[p['source_id']], mask=stored[p['raw_mask_key']].copy(),
+                           visible_fragments=[dict(f, mask=stored[f['mask_key']].copy())
+                               for f in rows[p['source_id']].get('visible_fragments', [])])
                       for p in packet['proposals']]
     backend = _read(directory/'segmentation_report.json')
     backend.pop('proposals')
@@ -122,10 +124,16 @@ def _view_summary(directory, role):
         pair['opposite_direction_hypothesis_present'] = (target, source) in pairs
     status = ('no_instances_detected_unknown' if not nodes else
               'possible_occlusion_requires_review' if pairs else 'no_occlusion_evidence_not_clear_scene')
+    from .structure import summarize_structure
+    structure = summarize_structure(list(by_id), list(pairs.values()))
     selection = _read(directory/'segmentation_report.json')['visible_hypothesis_selection']
     return dict(camera_id=camera, role=role, frame=packet['frame'], status=status,
                 instance_hypotheses=len(nodes), relation_graph=dict(nodes=nodes, edges=edges),
                 possible_pairs=list(pairs.values()), withheld_evidence=withheld,
+                occlusion_structure=structure,
+                collective_occlusions=local.get('collective_occlusions', []) + planar.get('collective_occlusions', []),
+                local_depth_regions=[dict(pair_id=p['pair_id'], **region)
+                    for p in local['pairs'] for region in p.get('local_regions', [])],
                 boundary_pair_statuses=dict(Counter(p['status'] for p in local['pairs'])),
                 segmentation_selection=selection,
                 artifacts=dict(evidence=str((directory/'evidence.png').resolve()),
@@ -147,7 +155,10 @@ def build_report(capture_dir, analysis_dir, output_dir, *, wrist_only=False):
     views, panels = {}, []
     for camera in cameras:
         candidates, backend = inputs[camera]
-        selected, selection = select_visible_hypotheses(candidates)
+        metadata = _read(capture_dir/camera/'grasp_input.json')
+        selected, selection = select_visible_hypotheses(candidates,
+            depth_m=np.load(capture_dir/camera/'depth_m.npy', allow_pickle=False),
+            intrinsics=metadata['depth_intrinsics'])
         backend['visible_hypothesis_selection'] = selection
         directory = output_dir/camera
         save_view(capture_dir/camera, selected, backend, directory, raw_proposals=candidates)

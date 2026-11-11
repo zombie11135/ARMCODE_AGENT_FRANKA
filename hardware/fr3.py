@@ -9,6 +9,7 @@ import uuid
 
 from .config import ArmConfig
 from .interfaces import Pose6D
+from runtime.timing import timed_stage, clock_identity, record_worker_timing
 
 
 class MotionError(RuntimeError):
@@ -77,6 +78,7 @@ if p.exists():
             self.motion_guard()
             return result
 
+    @timed_stage('机械臂调用', detail=lambda self, operation, *args, **kwargs: operation)
     def _request(self, operation, pose=None, *, goal_joints=None, grasp_candidates=None):
         if operation == "move" and not self.execution_enabled:
             raise RuntimeError("Movement requires execution_enabled=True (CLI: --execute)")
@@ -102,6 +104,7 @@ if p.exists():
             request['grasp_candidates'] = grasp_candidates
         source = Path(__file__).with_name("fr3_worker.py").read_text()
         interrupted = None
+        timing_clock = clock_identity()
         with tempfile.TemporaryFile(mode="w+") as output:
             process = subprocess.Popen(self._command(source, json.dumps(request, allow_nan=False)),
                                        cwd=self.workspace, stdout=output, stderr=subprocess.STDOUT,
@@ -133,6 +136,7 @@ if p.exists():
         if result.get("log_path"):
             result["host_log_path"] = str(self.workspace / Path(result["log_path"]).relative_to("/project"))
         self.last_result = result
+        record_worker_timing(result, timing_clock)
         if interrupted is not None:
             if not result.get("cleanup_ok"):
                 raise MotionError(result) from interrupted

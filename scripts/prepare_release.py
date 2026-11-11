@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE_DIRS = {
     "agents", "app", "core", "runtime", "services", "skill_lib", "skill_lab",
     "hardware", "perception_v2", "nesyro_gate", "gate_learning", "gate_sim",
-    "anyplace_real", "robocasa_occlusion", "occlusion_reasoning",
+    "anyplace_real", "robocasa_occlusion", "occlusion_reasoning", "simulation",
     "tests", "scripts", "docs", ".github",
 }
 ROOT_FILES = {
@@ -28,13 +28,14 @@ ROOT_FILES = {
     "capture_wrist_photos.sh",
     "run_robocasa_scene.sh", "run_occlusion_camera_test.sh",
     "calibrate_overhead_camera.sh", "test_aruco_pose.sh",
-    "test_gripper_contact.sh",
+    "test_gripper_contact.sh", "run_offline_check.sh",
     "ANYPLACE_REAL_STAGE1_REPORT.md", "ANYPLACE_REAL_STAGE2_REPORT.md",
     "PERCEPTION_V2_INITIAL_REPORT.md",
 }
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".txt", ".yaml", ".yml", ".json", ".dot", ".svg"}
 EXTRA_FILES = {
     "config/local.env.example", "config/hardware/fake.override.yaml",
+    "config/simulation/robosuite_panda.json",
     "docs/multimodal_gate_architecture.png",
     "skill_lab/test_segment_obj",
 }

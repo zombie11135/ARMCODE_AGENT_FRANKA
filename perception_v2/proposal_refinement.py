@@ -22,12 +22,15 @@ class RefinementConfig:
     internal_edge_margin_px: int = 2
     minimum_mask_pixels: int = 32
     max_recovery_windows: int = 4
+    fragment_cover_max_area_ratio: float = 3.0
 
     def __post_init__(self):
         if not np.isfinite(self.tile_fraction) or not .5 < self.tile_fraction < 1:
             raise ValueError("tile_fraction must be in (.5, 1)")
         if not np.isfinite(self.duplicate_iou) or not .5 < self.duplicate_iou <= 1:
             raise ValueError("duplicate_iou must be in (.5, 1]")
+        if not np.isfinite(self.fragment_cover_max_area_ratio) or self.fragment_cover_max_area_ratio < 1:
+            raise ValueError("fragment cover area ratio must be finite and >= 1")
         for name in ("internal_edge_margin_px", "minimum_mask_pixels", "max_recovery_windows"):
             value = getattr(self, name)
             if type(value) is not int or value < (1 if name == "minimum_mask_pixels" else 0):
@@ -94,14 +97,23 @@ def deduplicate(proposals, threshold):
     return retained, audit
 
 
-def select_visible_hypotheses(proposals, containment_threshold=.8):
+def select_visible_hypotheses(proposals, containment_threshold=.8, *, depth_m=None, intrinsics=None, fragment_validator=None, image=None, association_memory=None, association_context=None, fragment_advisor=None, enable_joint_reconciliation=False):
     """Select compatible visible-mask hypotheses; retain an audit of alternatives.
+
+    With aligned depth/intrinsics, first resolve nested surfaces and competing
+    joint-instance predictions. The RGB-only fallback below preserves masks.
 
     A small mask mostly contained in a larger prediction cannot simultaneously
     describe a distinct visible surface at those same pixels. Prefer the higher
     model score, without unioning masks, modifying depth, or claiming identity.
     The discarded alternative can be a real missed object if perception is wrong.
     """
+    if depth_m is not None:
+        from .instance_resolution import resolve_visible_instances
+        return resolve_visible_instances(proposals, depth_m, intrinsics, containment_threshold,
+            fragment_validator=fragment_validator, image=image, association_memory=association_memory,
+            association_context=association_context, fragment_advisor=fragment_advisor,
+            enable_joint_reconciliation=enable_joint_reconciliation)
     if not np.isfinite(containment_threshold) or not .5 < containment_threshold <= 1:
         raise ValueError("containment_threshold must be in (.5, 1]")
     selected, alternatives = [], []
@@ -184,7 +196,9 @@ def refine_proposals(image, prompts, backend, config=None):
         # Most tile-edge fragments already have a complete full-frame/tile
         # prediction. Only unresolved fragments need another model call.
         area = int(fragment['mask'].sum())
-        return any(np.count_nonzero(fragment['mask'] & p['mask']) >= config.duplicate_iou * area
+        x0, y0, x1, y1 = fragment['source_window_xyxy']
+        return any(p['mask'][y0:y1, x0:x1].sum() <= config.fragment_cover_max_area_ratio * area
+                   and np.count_nonzero(fragment['mask'] & p['mask']) >= config.duplicate_iou * area
                    for p in eligible)
 
     recovery_count = 0

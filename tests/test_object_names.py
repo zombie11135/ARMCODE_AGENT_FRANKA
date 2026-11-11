@@ -225,7 +225,8 @@ def test_ambiguity_returns_report_without_automatic_replan(scene,tmp_path):
     from agents.simple_agent_system import SimpleArmCodeAgentSystem, SimpleAgentSystemConfig
     service,_,_,_=scene
     system=SimpleArmCodeAgentSystem(SimpleAgentSystemConfig(goal='999',
-        project_root=str(tmp_path), failure_report_path=str(tmp_path/'failure.json')))
+        project_root=str(tmp_path), plan_json=str(tmp_path/'plan.json'),
+        failure_report_path=str(tmp_path/'failure.json')))
     result=ObjectNameResolver(service).lookup('999')
     with patch.object(system,'_run_task',side_effect=NameResolutionRequired(result)):
         outcome=system.run()

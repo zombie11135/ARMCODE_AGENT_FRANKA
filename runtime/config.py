@@ -20,6 +20,10 @@ class SimpleAgentSystemConfig:
     project_root: str = "."
     use_vdm: bool = False
     use_llm_planner: bool = False
+    policy_backend: str = 'template'
+    cap_policy_source: str = field(default='', repr=False)
+    enable_policy_pipeline: bool = True
+    enable_active_perception: bool = True
     scene_text: str = ""
     plan_json: str = "runs/current_plan/plan_graph.json"
     plan_md: str = "runs/current_plan/plan_graph.md"
@@ -35,6 +39,8 @@ class SimpleAgentSystemConfig:
     resume_from_failure: bool = True
     debug_output: bool = False
     enable_perception_pipeline: bool = True
+    # Fresh observation only for an explicitly failed grasp planner, never motion errors.
+    grasp_planning_retry_attempts: int = 1
     # Shared only inside this CLI process; a new task keeps the same home.
     home_pose_session: Any = None
     verbose_events: bool = False
@@ -163,6 +169,8 @@ class SimpleAgentSystemConfig:
     use_sam_for_grasp: bool = False
     target_name_bindings: Dict[str, str] = field(default_factory=dict)
     enable_geometry_occlusion: bool = False
+    enable_fragment_association: bool = False
+    enable_vlm_fragment_assistance: bool = False
     geometry_occlusion_checkpoint: str = ""
     geometry_occlusion_auxiliary: bool = True
     geometry_occlusion_buffer_poses_mmrad: List[List[float]] = field(default_factory=list)
@@ -171,3 +179,11 @@ class SimpleAgentSystemConfig:
     enable_llm_occlusion_recovery: bool = False
     geometry_occlusion_observation_budget: int = 2
     geometry_occlusion_recovery_view_poses_mmrad: List[List[float]] = field(default_factory=list)
+
+
+    def __post_init__(self):
+        if self.policy_backend == 'hybrid' and self.enable_geometry_occlusion and self.enable_active_perception:
+            # Seek evidence before requiring target identity. Physical clearing
+            # remains separately configured, with a checked buffer and budget.
+            self.enable_llm_occlusion_recovery = True
+            self.occlusion_allow_unlocalized_target = True

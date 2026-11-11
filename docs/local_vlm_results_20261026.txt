@@ -1,0 +1,82 @@
+本地 VLM 迁移与比较记录（2026-10-26）
+======================================
+
+结论：默认选择 qwen3vl-8b-awq，服务 http://127.0.0.1:8010/v1。
+本机 config/local.env 已设置默认本地模式，原线上 API 配置保留并另作私密备份。
+本轮未连接相机、未初始化机械臂、未执行抓放。完整真机任务成功率尚未验收。
+
+环境：RTX 4090 D 24GB；独立 Python 3.11.15、vLLM 0.18.0、PyTorch 2.10.0/CUDA 12.8、
+Transformers 4.57.6、huggingface_hub 0.36.2、compressed-tensors 0.13.0。
+机器人/感知环境未升级。可复用部署步骤见 local_vlm.txt。
+
+一、同条件比较
+
+两模型均为第三方 AWQ 4-bit 发布，固定 revision，依次加载，未同时占用显卡。
+共同设置：显存预算 0.45、上下文 8192、并发 1、prefill 批量 2048、
+图像上限 524288 像素、eager、temperature=0、本地客户端关闭 thinking。
+文本和图片先各热身一次，以下是热请求完整调用耗时；不包含服务冷启动。
+测试输入：5 个明确搬运目标映射、24 个历史清障决策快照；
+视觉是同两张保存图片各使用普通提示/生产校验模板，共四次提问。
+此为开发回放集：已根据其中的失败调整协议/提示词，非独立测试集，不能直接当作论文最终性能。
+
+模型 | 规划映射符合/中位秒/p95秒 | 清障菜单规则符合/中位秒/p95秒
+qwen35-9b-awq | 5/5 / 1.630 / 1.772 | 24/24 / 1.144 / 1.323
+  repo=cyankiwi/Qwen3.5-9B-AWQ-4bit; revision=e4d2d39cede8c5d1716d824cd843e2889c648083
+qwen3vl-8b-awq | 5/5 / 1.205 / 1.226 | 24/24 / 0.666 / 0.766
+  repo=cyankiwi/Qwen3-VL-8B-Instruct-AWQ-4bit; revision=914bc902ca94c0135be5aa70f25a616bfc853140
+
+规划按原始模型输出的抓取/放置目标对应关系计分，不用启发式回退掩盖模型错误。
+清障指标仅说明合法动作选择及提示词偏好符合，不代表搬对障碍物或完成了真实任务。
+比较只运行一遍，样本小；相邻历史帧存在相关性，不据此宣称泛化能力。
+
+视觉限制：9B 的遮挡布尔字段命中 1/4，8B 为 3/4，但这不是视觉准确率。
+两者都漏判过方块覆盖药盒；8B 另一次虽然判断有遮挡，却错误解释成蓝盘覆盖。
+9B 曾把不可见底面当作外物遮挡，另一次输出超过 token 预算而截断。
+所以不把 JSON 合法或单个布尔值命中当作完整视觉判断正确，几何证据仍是遮挡主依据。
+线上服务在热身时连接被拒绝，没有获得当前线上耗时，不能计算线上到本地的加速比。
+
+二、与感知/抓取模型共存
+
+8B 原预算 0.45 + DINO/MobileCLIP2/两份 SAM3 时，AnyGrasp 出现 CUDA OOM。
+预算降至 0.38 并释放空闲分配器缓存后可通过，峰值 23751 MiB，余量仍小。
+随后 bbox 分割和在线遮挡提议共享同一份 SAM3 权重，保留独立处理器/帧状态。
+最终同时驻留本地 VLM、DINO、MobileCLIP2、SAM3，顺序调用 SAM3、AnyGrasp 和 VLM 全部通过。
+最终整卡采样峰值 20135 MiB（19.66 GiB），约留 4 GiB 余量。
+AnyGrasp 使用历史约 902494 点的完整场景请求；RGB 模型使用另一份保存图像。
+这是资源共存测试，不是同一帧几何一致性或闭环任务完成测试。
+显存为整卡 nvidia-smi 每 250ms 采样，包含系统占用，可能漏掉极短峰值。
+共享前后 bbox 掩码逐像素一致=True；
+提议数量 6/6，掩码一致=True，最大分数差=0.0。
+一致性检查仅覆盖这张保存图像，结构共享的兼容边界另有离线回归。
+
+三、实际框架接入
+
+local VLM 选项统一覆盖规划、恢复、fallback、VDM 和遮挡校验的地址。
+本地服务仅监听回环；运行时设置 HF_HUB_OFFLINE、TRANSFORMERS_OFFLINE 并关闭用量统计。
+本地规划只输出 op/target，程序构造原有 PlanGraph；恢复只输出菜单索引和简短理由，
+宿主绑定本次冻结快照的完整 ID，沿用原动作合法性/观测版本校验。
+GPU 重推理串行协调，保留运动和 CPU 处理与推理重叠的流水线。
+AnyGrasp/本地 VLM 调用前释放空闲缓存，不卸载活跃权重或改变抓取参数。
+真实 app 入口以 --no_run_executor 验证了双目标规划→代码生成：
+grasp(西瓜霜)→place(blue tray)→grasp(抗病毒口服液)→place(pink tray)。
+planner 元数据为 llm / compact_actions_v1，图库绑定正确，没有使用启发式回退。
+
+四、证据路径（本机运行产物，不随 Git 上传）
+
+runs/local_vlm/comparison_compact_v2/{cases.json,comparison.json} 及各模型 records.jsonl
+runs/local_vlm/compare_qwen35_v1/：初始完整任务图协议及未压缩恢复协议的原始记录
+runs/local_vlm/coexistence_qwen3vl_v1/：0.45 预算的 OOM 记录
+runs/local_vlm/coexistence_qwen3vl_v2/：0.38 预算但 SAM3 尚未共享的通过记录
+runs/local_vlm/coexistence_qwen3vl_shared/：最终通过记录
+runs/local_vlm/sam3_shared_equivalence.json
+runs/local_vlm/agent_smoke/：真实 app 入口规划与动作脚本
+runs/local_vlm/environment-freeze.txt：完整环境版本
+runs/local_vlm/final_core_tests.txt：584 passed, 2 skipped
+
+当前代码为本轮本机工作树改动，尚未推送 GitHub。
+
+补充部署验证：
+另外 8 条未参与前述对比/提示调整的历史快照，规则符合 8/8，中位 0.616 秒。
+这仍来自同一批历史采集，帧间相关，不能替代新场景独立测试。
+直接调用生产 OcclusionRecoveryPlanner.decide，clear/observe/pause 三类均返回正确且绑定当前快照的动作；未执行动作。
+证据：runs/local_vlm/holdout_recovery/、runs/local_vlm/recovery_agent_smoke/。

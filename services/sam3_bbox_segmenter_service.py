@@ -64,17 +64,14 @@ class SAM3BBoxSegmenterService:
         print(f"[SAM3BBox] device: {self.device}")
         print(f"[SAM3BBox] use_autocast: {self.use_autocast}")
 
-        from sam3.model_builder import build_sam3_image_model
+        from services.sam3_model_pool import image_model
         from sam3.model.sam3_image_processor import Sam3Processor
 
-        self.model = build_sam3_image_model(
-            checkpoint_path=str(self.checkpoint_path),
-            load_from_HF=False,
+        self.model = image_model(
+            str(self.checkpoint_path),
             device=self.device,
-            eval_mode=True,
-            enable_segmentation=True,
-            enable_inst_interactivity=self.enable_inst_interactivity,
-            compile=self.compile_model,
+            interactive=self.enable_inst_interactivity,
+            compile_model=self.compile_model,
         )
 
         self.processor = Sam3Processor(

@@ -1,0 +1,116 @@
+SSD 部署记录（2026-11-04）
+==========================
+
+当前可用入口
+
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash run_offline_check.sh
+
+该命令加载 config/local.env，使用保存的真实场景照片运行 GroundingDINO、
+MobileCLIP2、SAM3 和本地 Qwen3-VL；不会创建相机、机械臂或夹爪实例。
+首次启动本地 VLM 可能需要约一分钟；已运行的同模型服务会被复用。
+默认照片是 runs/live_scene_decision/20261022_194928/capture/wrist/color.png。
+默认结果写到 runs/offline_stack/results.json，并保存 SAM3 掩码、叠加图和裁剪图。
+
+  bash run_offline_check.sh --image /absolute/path/medicine_scene.png --output runs/offline_stack/my_scene
+  bash run_offline_check.sh --skip-vlm
+
+需要用含药盒的照片验证这条链路。passed 表示模型调用完成及基础输出检查通过，
+不代表药品身份、遮挡语义或机器人任务正确。报告中的拒识和误判需独立分析。
+
+目录和环境
+
+项目外层：/home/wpy/projects/armcode-agent (1)
+主仓库：  /home/wpy/projects/armcode-agent (1)/armcode-agent
+运行依赖：/home/wpy/armcode-runtime
+外层 runtime 是指向该运行依赖目录的链接，实际文件都在 NVMe SSD 上。
+项目外层约 27 GB，运行依赖约 45 GB。机械盘原项目及原环境完整保留。
+
+  armcode-runtime/agent                 原主环境，Python 3.10.20
+  armcode-runtime/grasp                 AnyGrasp 环境，Python 3.11.5
+  armcode-runtime/py311                 VLM 基础解释器，Python 3.11.15，约 225 MB
+  armcode-runtime/models/local-vlm      两套已固定版本的 AWQ 模型
+  armcode-runtime/models/sam3           SAM3 权重
+  armcode-runtime/models/grounding-dino-tiny
+  armcode-runtime/anygrasp_sdk          SDK、权重及原授权目录
+  armcode-runtime/ros_ws                外部 ROS 工作区
+  armcode-runtime/cache                后续运行缓存
+
+只抽取/重建了 VLM 所需的轻量 Python 基础环境，没有迁移整个 IsaacLab。
+感知运行入口仍使用仓库 .venv-mobileclip2-fr3，包含 MobileCLIP2 的隔离依赖；
+它的基础解释器和第三方源码已指向 SSD agent 环境。
+VLM 使用仓库 .venv-vlm-local，基础解释器已改为 SSD py311，不再依赖 IsaacLab。
+MobileCLIP2 权重和项目自带依赖已经随仓库迁到 SSD。
+
+  conda env list
+  conda activate armcode_agent
+
+armcode_agent、anygrasp、armcode_vlm_python 通过 miniconda3/envs 下的链接提供名称。
+旧机械盘环境名称仍保留，属于原项目的备份或其他项目，不要误选 env_armcode_agent。
+conda activate armcode_agent 进入基础环境。日常运行本项目请使用上面的启动脚本，
+或 source .venv-mobileclip2-fr3/bin/activate，以加载 MobileCLIP2 隔离依赖。
+VLM venv 未单独安装 pip；可以用 Conda base 的 pip --python 管理它：
+  /home/wpy/miniconda3/bin/python -m pip --python .venv-vlm-local/bin/python check
+
+本地 VLM
+
+默认：qwen3vl-8b-awq，http://127.0.0.1:8010/v1。
+GPU 0 用于感知；GPU 1 用于 VLM，约占 9.2 GiB 显存。
+config/local.env 中 ARM_LOCAL_VLM_CUDA_VISIBLE_DEVICES=1 仅改变 VLM 子进程的设备。
+另一套 qwen35-9b-awq 权重已迁移，但本次没有对它重新做推理验收。
+
+  source scripts/load_local_env.sh
+  .venv-mobileclip2-fr3/bin/python -m runtime.local_vlm status
+  .venv-mobileclip2-fr3/bin/python -m runtime.local_vlm stop
+
+run_offline_check.sh 和正常 Agent 入口都会在需要时自动启动服务。
+前台手动启动：
+  source scripts/load_local_env.sh
+  .venv-mobileclip2-fr3/bin/python -m runtime.local_vlm serve --model qwen3vl-8b-awq
+
+只验证正式 Agent 规划与代码生成的命令（不执行动作）：
+  bash run_fr3_agent.sh --simple_actions --use_llm_planner --no_run_executor \
+    --goal '将西瓜霜放到蓝色盘子中，将抗病毒口服液放到粉色盘子中'
+
+本次验证
+
+1. scripts/check_core.py：603 passed, 2 skipped。
+2. 本地 CUDA 可用，两张 NVIDIA GeForce RTX 4090 D；没有重装驱动。
+3. 保存照片的 DINO 检测、MobileCLIP2 识别、SAM3 非空掩码、VLM 文字及图片请求均完成。
+4. VLM 五个任务规划映射通过 5/5；两张已有遮挡标注图片命中 1/2。
+   方块遮挡药盒的样例仍被误判为无遮挡；这是明确的视觉语义限制。
+   综合场景中 MobileCLIP2 也出现误识别，不能把部署通过等同于识别准确。
+5. 正式 Agent 入口在 --no_run_executor 下完成双目标规划及代码生成，planner=llm。
+6. VLM 依赖一致性检查通过；两个项目 venv 的基础解释器、模块搜索路径及运行依赖链接
+   不再指向机械盘或旧电脑。硬件标定、夹爪接触参数和参考库配置与源项目一致。
+
+代码修复
+
+services/sam3_model_pool.py：当前 SAM3 SDK 仅在 device == 'cuda' 时迁移模型；
+传入 cuda:0 会留下 CPU 权重。现在先在 CPU 构建，再显式将模型移动到请求的设备。
+runtime/local_vlm.py：支持仅为 VLM 服务指定 GPU。
+scripts/check_offline_stack.py 和 run_offline_check.sh：新增可重复运行的无硬件验证入口。
+原工作树已有修改全部保留，没有重置分支或覆盖原有实现。
+
+AnyGrasp 和后续实机
+
+AnyGrasp Python、Torch、Open3D、MinkowskiEngine 的加载及 CUDA 检查通过。
+授权由用户处理；新授权应安装到当前 SSD SDK 的目录：
+  /home/wpy/armcode-runtime/anygrasp_sdk/grasp_detection/license
+授权申请工具位于 SDK 的 license_registration；按其 README 操作。
+本次没有将 SDK import 的退出码视为授权成功，也没有进行 AnyGrasp 抓取推理。
+FR3、RealSense 和 Robotiq 尚未进行实机验收，Docker/ROS 服务启动留待连接硬件时完成。
+普通 Agent 交互入口可能初始化相机；硬件未连接时使用离线检查或明确的 --no_run_executor。
+
+证据与回退
+
+  runs/offline_stack/20261104/results.json
+  runs/offline_stack/20261104/sam3_overlay.png
+  runs/offline_stack/20261104/vlm_replay/{summary.json,records.jsonl}
+  runs/offline_stack/20261104/agent/{plan.json,executor.py}
+  runs/migration/dependencies-20261104/
+
+迁移记录包含各组件 rsync 日志、前缀修复清单、回归日志和修改前的私有配置备份。
+before/config/local.env 含本机 API 配置，仅供本人回退，不要分享或提交 Git。
+源数据位于 /data/wpy，下方旧路径兼容挂载不参与当前项目的运行依赖。
+不要将历史迁移脚本再次运行到已修复的目标目录；重新 rsync 会覆盖环境前缀修复。

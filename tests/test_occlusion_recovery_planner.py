@@ -233,3 +233,76 @@ def test_cli_rejects_recovery_without_geometry_before_profile_or_device_setup(mo
             cli.main()
         assert stopped.value.code == 2
         apply.assert_not_called()
+
+
+def test_planning_unknown_target_offers_reveal_action_without_buffer(graph):
+    from agents.information_plan import build_information_plan
+    s = snapshot(graph, buffers=[], allow_clear=False, planning_only=True)
+    selected = next(a for a in s['allowed_actions'] if a['action'] == 'plan_clear')
+    assert selected['node_id'] == 'node_0'
+    assert not any(a['action'] == 'clear' for a in s['allowed_actions'])
+    plan = build_information_plan(s, dict(selected, reason='先揭示被挡区域'))
+    assert plan['steps'][0]['expected_visible_regions'] == ['node_1']
+    assert plan['steps'][0]['buffer_pose_mmrad'] is None
+    assert plan['steps'][0]['exploratory']
+    assert 'no_free_buffer_slot' in plan['prerequisites']
+    assert plan['target_grasp_requires_identity']
+    assert not plan['outcome_verified']
+
+
+def test_information_plan_runtime_never_touches_devices_or_spends_motion_budget(graph, tmp_path):
+    from core.context import RuntimeContext
+    from skill_lib.simple_actions import SimpleRobotActions, SimpleRobotConfig
+    from skill_lib.actions.llm_occlusion_recovery import recover_once
+    planner = Mock()
+    planner.decide.side_effect = lambda s: dict(snapshot_id=s['snapshot_id'],
+        action_id='plan_clear:node_0', reason='先揭示区域再识别')
+    robot = SimpleRobotActions(RuntimeContext(occlusion_recovery_planner=planner), SimpleRobotConfig(
+        execute=False, occlusion_allow_unlocalized_target=True,
+        nesyro_gate_trace_path=str(tmp_path/'gate.jsonl')))
+    robot._move_xarm = Mock(side_effect=AssertionError('No motion'))
+    robot._observe_medicine_once = Mock(side_effect=AssertionError('No redundant capture'))
+    robot._invoke_clear_occlusion_skill = Mock(side_effect=AssertionError('No clear execution'))
+    kind, result = recover_once(robot, '西瓜霜', graph, choose_blocker(graph, allow_search=True))
+    assert kind == 'stop' and not result.success
+    assert result.data['failure_type'] == 'geometry_information_plan_ready'
+    assert result.data['recovery_pending']
+    assert not robot.occlusion_recovery_counts and robot.geometry_buffer_slots_used == 0
+    assert json.loads((tmp_path/'information_plan.json').read_text())['status'] == 'planned_not_executed'
+    robot._move_xarm.assert_not_called()
+    robot._invoke_clear_occlusion_skill.assert_not_called()
+    robot._observe_medicine_once.assert_not_called()
+
+
+def test_execute_mode_does_not_turn_proposed_clear_into_unconfigured_motion(graph):
+    s = snapshot(graph, buffers=[], allow_clear=False, planning_only=False)
+    assert {a['action'] for a in s['allowed_actions']} == {'pause', 'observe'}
+    assert s['information_candidates'][0]['node_id'] == 'node_0'
+
+
+@pytest.mark.parametrize('case', ['no_edges', 'ambiguous', 'budget'])
+def test_information_planning_does_not_invent_eligible_nodes_or_budget(graph, case):
+    if case == 'no_edges':
+        graph['primary']['possible_pairs'] = []
+    elif case == 'ambiguous':
+        graph['target_association']['status'] = 'target_association_ambiguous'
+    s = snapshot(graph, clear_count=1 if case == 'budget' else 0, planning_only=True)
+    assert not any(a['action'] == 'plan_clear' for a in s['allowed_actions'])
+
+
+def test_configured_view_is_proposed_in_planning_mode(graph):
+    s = snapshot(graph, planning_only=True, views={'view_1': [400,100,600,3.14,0,0]})
+    assert any(a['action'] == 'plan_observe' for a in s['allowed_actions'])
+    assert not any(a['action'] == 'observe' and a['view_id'] != 'current' for a in s['allowed_actions'])
+
+
+def test_hybrid_defaults_seek_information_without_enabling_physical_clear():
+    from runtime.config import SimpleAgentSystemConfig
+    c = SimpleAgentSystemConfig(goal='test', policy_backend='hybrid', enable_geometry_occlusion=True)
+    assert c.enable_llm_occlusion_recovery and c.occlusion_allow_unlocalized_target
+    assert not c.execute_robot and not c.enable_occlusion_recovery
+    disabled = SimpleAgentSystemConfig(goal='test', policy_backend='hybrid',
+        enable_geometry_occlusion=True, enable_active_perception=False)
+    assert not disabled.enable_llm_occlusion_recovery
+    baseline = SimpleAgentSystemConfig(goal='test', policy_backend='template', enable_geometry_occlusion=True)
+    assert not baseline.enable_llm_occlusion_recovery

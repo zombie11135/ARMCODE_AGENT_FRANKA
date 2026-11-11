@@ -1,3 +1,4 @@
+from hardware.config import ArmConfig
 """Agent interfaces exercised with saved/synthetic observations and mocked devices."""
 import copy
 from dataclasses import replace
@@ -81,7 +82,7 @@ class AgentIntegrationTests(unittest.TestCase):
         service.save_geometry.assert_called_once()
 
     def test_contact_then_lift_from_actual_pose(self):
-        arm, grip = Mock(), Mock(spec=Robotiq2F85)
+        arm, grip = Mock(config=ArmConfig()), Mock(spec=Robotiq2F85)
         grip.assert_healthy.return_value = GripperStatus(True, True, 3, 2, 0, 255, 120, 20)
         arm.motion_guard = lambda: None
         arm.get_pose.return_value = Pose6D(.301, .019, .399, np.pi, 0, -np.pi/2)
@@ -94,8 +95,23 @@ class AgentIntegrationTests(unittest.TestCase):
                                   [.301, .019, .449, np.pi, 0, -np.pi/2])
         closed.assert_called_once()
 
+    def test_grasp_endpoint_is_checked_before_any_actuation(self):
+        arm, grip = Mock(config=ArmConfig()), Mock()
+        context = RuntimeContext(arm=arm, gripper=grip)
+        opened, closed = Mock(), Mock()
+        arm.plan_pose.side_effect = [{"ok": True}, MotionError({"error": "grasp endpoint collides"})]
+        with self.assertRaisesRegex(MotionError, 'grasp endpoint collides'):
+            execute_grasp(context, self.plan, opened, closed)
+        self.assertEqual(arm.plan_pose.call_count, 2)
+        expected = self.plan['best_grasp_xarm_mmrad']
+        np.testing.assert_allclose(arm.plan_pose.call_args.args[0].values,
+                                  [*[x / 1000 for x in expected[:3]], *expected[3:]])
+        opened.assert_not_called()
+        closed.assert_not_called()
+        arm.move_pose.assert_not_called()
+
     def test_motion_or_close_failure_never_lifts_or_retries(self):
-        arm, grip = Mock(), Mock()
+        arm, grip = Mock(config=ArmConfig()), Mock()
         arm.motion_guard = None
         ctx = RuntimeContext(arm=arm, gripper=grip)
         closed = Mock(return_value=True)
@@ -112,7 +128,7 @@ class AgentIntegrationTests(unittest.TestCase):
     def test_agent_close_without_contact_lifts_and_transport_keeps_health_guard(self):
         from agents.simple_agent_system import SimpleAgentSystemConfig
         from agents.simple_execution_runtime import SimpleExecutionRuntime
-        arm, grip = Mock(), Mock(spec=Robotiq2F85)
+        arm, grip = Mock(config=ArmConfig()), Mock(spec=Robotiq2F85)
         arm.get_pose.return_value = Pose6D(.301, .019, .399, np.pi, 0, -np.pi/2)
         arm.motion_guard = None
         empty = GripperStatus(True, True, 3, 3, 0, 255, 240, 10)
@@ -142,7 +158,7 @@ class AgentIntegrationTests(unittest.TestCase):
             arm.move_pose(self.pose)
 
     def test_post_close_fault_prevents_lift_even_when_contact_is_not_required(self):
-        arm, grip = Mock(), Mock(spec=Robotiq2F85)
+        arm, grip = Mock(config=ArmConfig()), Mock(spec=Robotiq2F85)
         arm.motion_guard = None
         grip.assert_healthy.side_effect = GripperError('gripper session fault')
         context = RuntimeContext(arm=arm, gripper=grip)
@@ -164,7 +180,7 @@ class AgentIntegrationTests(unittest.TestCase):
 
     def test_closing_current_cutoff_aborts_before_lift(self):
         from hardware.robotiq import GripperCurrentLimitError
-        arm, grip = Mock(), Mock()
+        arm, grip = Mock(config=ArmConfig()), Mock()
         arm.motion_guard = None
         context = RuntimeContext(arm=arm, gripper=grip)
         close = Mock(side_effect=GripperCurrentLimitError('test current cutoff'))
@@ -177,7 +193,7 @@ class AgentIntegrationTests(unittest.TestCase):
     def test_unconfigured_home_uses_current_fr3_flange(self):
         from agents.simple_agent_system import SimpleAgentSystemConfig
         from agents.simple_execution_runtime import SimpleExecutionRuntime
-        arm = Mock(); arm.get_pose.return_value = self.pose
+        arm = Mock(config=ArmConfig()); arm.get_pose.return_value = self.pose
         cfg = SimpleAgentSystemConfig(goal='test', hardware_config_path=str(DEFAULT_CONFIG))
         robot = SimpleExecutionRuntime(cfg)._build_robot(RuntimeContext(arm=arm, transforms=self.transforms))
         np.testing.assert_allclose(robot.config.home_pose_mmrad[:3], np.array(self.pose.values[:3])*1000)
@@ -274,7 +290,7 @@ class AgentIntegrationTests(unittest.TestCase):
                 'depth_aligned_to_color': True, 'color_intrinsics': {'coeffs': [0.] * 5}}
                 for number in (10, 11, 12)]
             camera.capture_wrist.side_effect = frames
-            arm = Mock(); arm.get_pose.return_value = self.pose
+            arm = Mock(config=ArmConfig()); arm.get_pose.return_value = self.pose
             wrapped = CalibratedCamera(camera, self.config, arm=arm)
             with patch('hardware.agent_camera.time.time', return_value=100), patch('hardware.agent_camera.time.sleep'):
                 result = wrapped.capture_wrist()
@@ -291,7 +307,7 @@ class AgentIntegrationTests(unittest.TestCase):
         camera = Mock()
         camera.capture_wrist.side_effect = [{'color_frame_number': 1},
             {'color_frame_number': 3, 'timestamp': 101}]
-        arm = Mock()
+        arm = Mock(config=ArmConfig())
         arm.get_pose.side_effect = [self.pose, Pose6D(.41, 0, .5, np.pi, 0, -np.pi/2)]
         wrapped = CalibratedCamera(camera, self.config, arm=arm)
         with patch('hardware.agent_camera.time.time', return_value=100), patch('hardware.agent_camera.time.sleep'):

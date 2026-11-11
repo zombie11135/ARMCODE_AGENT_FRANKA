@@ -10,12 +10,14 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from core.skill_base import BaseSkill, SkillResult
+from runtime.timing import timed_stage
 import traceback
 
 class PlanGraspWithAnyGraspSkill(BaseSkill):
     name = "plan_grasp_with_anygrasp"
     description = "使用 AnyGrasp 根据 RGB-D 和目标 mask 生成抓取，并直接转换为 xArm base 坐标系抓取位姿。"
 
+    @timed_stage('抓取规划与位姿筛选')
     def run(
         self,
         grasp_input: Dict[str, Any],
@@ -102,7 +104,8 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
             depth_scale = grasp_input.get("depth_scale", 1000.0)
 
             backend = getattr(anygrasp, 'backend', None)
-            backend_label = 'GSNet' if backend == 'gsnet' else 'AnyGrasp'
+            backend_label = {'gsnet': 'GSNet', 'graspnet_baseline': 'GraspNet-baseline',
+                             'anygrasp': 'AnyGrasp'}.get(backend, 'AnyGrasp')
             self.context.emit_text(f"正在调用 {backend_label} 生成相机系抓取候选...")
 
             fr3_args = {}
@@ -402,7 +405,8 @@ class PlanGraspWithAnyGraspSkill(BaseSkill):
 
         except Exception as e:
             tb = traceback.format_exc()
-            error = f"AnyGrasp base 抓取规划失败: {e}\n{tb}"
+            backend = getattr(getattr(self.context, "anygrasp", None), "backend", "grasp")
+            error = f"{backend} 抓取规划失败: {e}\n{tb}"
 
             try:
                 self.context.emit_error(error)

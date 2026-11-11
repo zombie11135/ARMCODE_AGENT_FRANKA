@@ -439,13 +439,55 @@ class PlanningAgent:
             or getattr(self.context, "fallback_vlm", None)
             or self.context.require("vlm")
         )
-        prompt = self._build_llm_prompt(task_goal, scene_text, constraints)
+        compact = getattr(vlm, 'compact_planning', False) is True
+        prompt = (self._build_compact_llm_prompt(task_goal, scene_text, constraints) if compact
+                  else self._build_llm_prompt(task_goal, scene_text, constraints))
         text = vlm.chat(text=prompt, max_tokens=2048, temperature=0.1)
         data = self._extract_json(text)
-        graph = PlanGraph.from_dict(data)
+        graph = (self._compact_actions_to_graph(data, task_goal, constraints) if compact
+                 else PlanGraph.from_dict(data))
         graph.scene_text = scene_text
         graph.metadata.setdefault("planner", "llm")
         graph.metadata.setdefault("source", "PlanningAgent._plan_with_llm")
+        return graph
+
+    def _build_compact_llm_prompt(self, task_goal, scene_text, constraints):
+        references = getattr(self.context, 'object_references', None)
+        catalog = references.catalog() if references is not None else []
+        names = [{key: obj[key] for key in ('name', 'aliases', 'category') if key in obj} for obj in catalog]
+        return '''你是机械臂任务规划器，只输出紧凑 JSON，不要解释、Markdown 或任务图字段。
+格式：{"actions":[{"op":"grasp","target":"西瓜霜"},{"op":"place","target":"blue tray"}]}。
+op 只允许 observe、grasp、place，每个动作只包含 op 和 target。target 必须是非空字符串。
+grasp 技能内部已经包含观测、身份匹配、分割、抓取规划及必要的清障恢复。
+常规搬运只输出 grasp→place，不添加重复 observe；仅用户明确要求观察或失败约束要求时添加 observe。
+逐项保留用户的物体→容器对应关系和明确先后顺序，不能遗漏目标、互换容器、连续抓两个物体。
+grasp.target 使用用户指定的物体原称，由执行框架绑定身份，不编造编号或声称已经识别到物体。
+容器统一为 blue tray、pink tray、green container 等英文颜色+类型；未指定颜色的收纳盒为 container。
+用户指定药名或已登记物体时可以规划 grasp，执行前仍由技能确认；没有照片不等于禁止制定计划。
+图库不证明物体在场；未登记且只凭颜色/方位描述的未知物体只规划 observe，不擅自确认药名。
+不要额外要求 OCR，不生成运动坐标、阈值或技能代码。遵守已有失败约束。
+'''+json.dumps(dict(goal=task_goal, scene=scene_text, constraints=constraints,
+                    reference_catalog=names), ensure_ascii=False)
+
+    @staticmethod
+    def _compact_actions_to_graph(data, task_goal, constraints):
+        if not isinstance(data, dict) or set(data) != {'actions'}:
+            raise ValueError('Compact plan must contain actions only')
+        actions = data['actions']
+        if not isinstance(actions, list) or not actions:
+            raise ValueError('Compact plan must contain a nonempty action list')
+        graph = PlanGraph(goal=task_goal, constraints=list(constraints), root_id='n0',
+                          metadata={'response_format': 'compact_actions_v1'})
+        for i, action in enumerate(actions):
+            if (not isinstance(action, dict) or set(action) != {'op', 'target'} or
+                    action['op'] not in ('observe', 'grasp', 'place') or
+                    not isinstance(action['target'], str) or not action['target'].strip()):
+                raise ValueError('Invalid compact action; expected known op and nonempty target')
+            op, target = action['op'], action['target'].strip()
+            graph.add_node(PlanNode(node_id=f'n{i}', label=target, node_type=op,
+                instruction=f'{op}({target})', skill=op, args={'target': target}))
+            if i:
+                graph.add_edge(source=f'n{i-1}', target=f'n{i}', edge_type='control')
         return graph
 
     def _plan_heuristic(

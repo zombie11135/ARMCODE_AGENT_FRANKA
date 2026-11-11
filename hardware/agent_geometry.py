@@ -1,5 +1,6 @@
 """FR3 branches for the existing mm/rad skill API. Pure geometry, no devices."""
 import math
+from contextlib import contextmanager
 import random
 import numpy as np
 
@@ -146,7 +147,8 @@ def grasp_plan(grasp_input, result, transforms, workcell, *, target_rx=math.pi, 
                     jaw_symmetry_flipped=chosen['jaw_symmetry_flipped'],
                     source_rotation_matrix=chosen['source_rotation_matrix'])
     backend = result.get('backend', 'gsnet')
-    label = 'AnyGrasp' if backend == 'anygrasp' else 'GSNet'
+    label = {'anygrasp': 'AnyGrasp', 'gsnet': 'GSNet',
+             'graspnet_baseline': 'GraspNet-baseline'}.get(backend, str(backend))
     reason = (f"{label} 基座系姿态筛选 {len(good)}/{len(evaluated)}；{grasp_selection_mode}，"
               f"候选 {chosen['index']}，原始分 {chosen_row['raw_score']:.4f}，"
               f"综合分 {chosen_row['effective_score']:.4f}，"
@@ -162,14 +164,35 @@ def grasp_plan(grasp_input, result, transforms, workcell, *, target_rx=math.pi, 
             'grasp_input': grasp_input, 'choose_reason': reason}
 
 
+@contextmanager
+def _grasp_contact_speed(arm):
+    """Cap contact stages without speeding up a slower operator override."""
+    original = arm.config.speed_scaling
+    arm.set_speed_scaling(min(original, arm.config.grasp_contact_speed_scaling))
+    try:
+        yield
+    finally:
+        arm.set_speed_scaling(original)
+
+
 @scene_mutation('grasp')
 def execute_grasp(context, plan, gripper_open, gripper_close):
     """Approach -> grasp -> completed close -> lift; contact is telemetry only."""
     arm, gripper = context.require('arm'), context.require('gripper')
     if gripper_open is None or gripper_close is None:
         raise RuntimeError('FR3 grasp requires Robotiq open/close callbacks; disable_grip cannot grasp')
+    progress = dict(operation='grasp', stage='precheck', motion_started=False,
+                    holding_state='empty', released=False)
+    context.manipulation_progress = progress
     pregrasp = plan['approach_pose_mmrad']
     arm.plan_pose(Pose6D(*[v / 1000 for v in pregrasp[:3]], *pregrasp[3:]))
+    # Reject an invalid grasp endpoint before opening or moving to pregrasp.
+    # These are prechecks from the current state, not a reusable two-leg plan:
+    # move_pose still replans/audits each leg from its actual execution state.
+    grasp = plan['best_grasp_xarm_mmrad']
+    with _grasp_contact_speed(arm):
+        arm.plan_pose(Pose6D(*[v / 1000 for v in grasp[:3]], *grasp[3:]))
+    progress['stage'] = 'open_gripper'
     if not gripper_open():
         from .robotiq import GripperError
         raise GripperError('Robotiq open failed')
@@ -177,18 +200,28 @@ def execute_grasp(context, plan, gripper_open, gripper_close):
     for name, key in [('move_pregrasp', 'approach_pose_mmrad'), ('move_grasp', 'best_grasp_xarm_mmrad')]:
         values = plan[key]
         pose = Pose6D(*[v / 1000 for v in values[:3]], *values[3:])
-        steps.append({'stage': name, 'result': arm.move_pose(pose)})
+        progress.update(stage=name, motion_started=True)
+        if name == 'move_grasp':
+            with _grasp_contact_speed(arm):
+                result = arm.move_pose(pose)
+        else:
+            result = arm.move_pose(pose)
+        steps.append({'stage': name, 'result': result})
+    progress.update(stage='close_gripper', holding_state='unknown')
     if not gripper_close():
         from .robotiq import GripperError
         raise GripperError('Robotiq 闭合未正常完成；不抬升、不自动重试')
     closed_state = gripper.assert_healthy(require_ready=True)
+    progress.update(stage='lift', holding_state='possibly_holding')
     actual = arm.get_pose().values
     actual[2] += plan.get('lift_distance_m', .05)
     previous_guard = arm.motion_guard
     arm.motion_guard = lambda: gripper.assert_healthy(require_ready=True)
     try:
-        steps.append({'stage': 'lift', 'result': arm.move_pose(Pose6D(*actual))})
+        with _grasp_contact_speed(arm):
+            steps.append({'stage': 'lift', 'result': arm.move_pose(Pose6D(*actual))})
     finally:
         arm.motion_guard = previous_guard
+    progress['stage'] = 'complete'
     return {'success': True, 'steps': steps, 'gripper_close_completed': True,
             'contact_required': False, 'contact_detected': bool(closed_state.object_detected_closing)}

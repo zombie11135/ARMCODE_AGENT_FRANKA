@@ -1,0 +1,101 @@
+FR3 真机恢复验证（2026-11-05）
+============================
+
+活动项目：/home/wpy/projects/armcode-agent (1)/armcode-agent
+运行环境：/home/wpy/armcode-runtime
+ROS 工作区：/home/wpy/armcode-runtime/ros_ws
+本轮记录：runs/restoration/20261105/
+
+本轮变更
+- config/hardware/fr3.yaml 的 grasp_backend 从 anygrasp 切换为 gsnet。
+- GSNetService 的推理和预览子进程优先使用 GSNET_PICK_PYTHON。
+  主感知环境 NumPy 1.26.4；GSNet 环境 NumPy 1.23.5。
+  graspnetAPI 依赖已弃用的 np.float，不应直接放进主感知环境运行。
+- /home/wpy/qwen-vl-local/start.sh、deploy.py 改为 SSD 项目、模型和缓存路径。
+  默认 GPU 1，--gpu 参数同时传递给 ARM_LOCAL_VLM_CUDA_VISIBLE_DEVICES。
+- 修改前备份位于 runs/restoration/20261105/before/。
+
+已验证
+1. FR3 172.16.0.2 可连接，FCI 由用户确认已启用。
+   被动状态读取成功，机器人 Idle，无 current_errors/last_motion_errors。
+2. 真实 ROS 2/MoveIt 2 Docker 容器已运行；状态广播器 active，
+   fr3_arm_controller inactive。当前仍使用 generic 内核，运动控制实时性尚未验证。
+3. Robotiq 串口 /dev/serial/by-id/usb-FTDI_USB_TO_RS-485_DAAL8LK6-if00-port0，
+   115200 baud，slave 9。用户已加入 dialout。
+   5 秒内成功读取 50/50 次，稳定样本全部 ready、fault=0x00。
+   首次 fault=0x09，约 0.1 秒后恢复；本次仅 FC03 读取，写寄存器次数为零。
+4. 腕部 349622072103、固定 346522072096 两台 D435i 采集成功。
+   腕部采集前后位移约 0.011 mm，角差约 0.000026 rad；不是硬件时间同步。
+5. GSNet 使用 graspness_realsense.tar 完成真实点云推理。
+   158096 个点，1024 个原始抓取，宽度/分数筛选后 1015 个，
+   全场景近似夹爪碰撞和空抓筛选后 133 个。总调用约 6.9 秒。
+   这不是目标药盒的已验证机器人执行轨迹；只完成候选生成。
+6. 当前腕部图像上的 DINO、MobileCLIP2、SAM3、本地 Qwen-VL 调用成功。
+   参考库识别中抗病毒口服液、蒙脱石散通过门槛；布洛芬、西瓜霜未通过。
+   DINO 也把纸箱、SSD 包装等列入候选。运行通过不等于识别准确率验证通过。
+7. MoveIt 只规划保持当前法兰姿态、基座 Z 上移 0.02 m，速度比例 0.05。
+   规划时法兰由 z=0.56604 m 到 z=0.58604 m；计划约 6.785 秒，
+   363 个碰撞检查样本通过，端点奇异性检查通过，未执行。
+
+原配置保留的限制
+- 本轮未重新标定；手眼/TCP 原文件保持不变。
+- fr3_handeye.yaml 中夹爪轴向 alignment_verified=false、alignment_status=nominal_preview。
+- ros_ws/config/workcell.json 中 grasp_table_clearance_check=false、table_z_m=0。
+  因而 GSNet 报告的 after_above_table 不能解释为通过了真实桌面高度验证。
+  MoveIt 仍检查其配置的桌面、工具包络和自碰撞，但这些不替代现场验证。
+- 尚未验证实际运动、夹爪开合/夹持、目标抓取及放置。
+  首次上抬动作等待用户确认现场人员、净空和线缆；不能自动续执行。
+
+常用命令
+启动/复用本地 VLM（GPU 1）：
+  bash /home/wpy/qwen-vl-local/start.sh
+仅验证 VLM 接口：
+  bash /home/wpy/qwen-vl-local/start.sh --verify-only
+
+查看真实控制器状态（不会运动）：
+  cd /home/wpy/armcode-runtime/ros_ws
+  sg docker -c 'bash scripts/real.sh status'
+
+旧会话可能还没有新组权限。当前诊断用 sg dialout / sg docker；
+重新登录后 id -nG 应同时包含 dialout 和 docker，无需为此重启机器。
+已运行的 ROS 容器占用 FCI 时，不要并行启动另一个 pylibfranka/libfranka 连接。
+
+重复保存图像的感知验证（不会访问设备）：
+  cd '/home/wpy/projects/armcode-agent (1)/armcode-agent'
+  bash run_offline_check.sh --image 'runs/restoration/20261105/camera/observations/3be68899e7a0499dbab40122d1229961/color.png' --output runs/restoration/20261105/perception-repeat
+
+交互式任务规划入口（不启用执行器）：
+  bash run_fr3_agent.sh --local_vlm qwen3vl-8b-awq --no_run_executor
+
+证据
+- 夹爪：runs/restoration/20261105/gripper/robotiq-comm-20261105-123905-290239.json
+- 相机：runs/restoration/20261105/camera/{wrist,global}.json
+- GSNet：runs/restoration/20261105/gsnet_result.json
+- GSNet 筛选：runs/agent_gsnet/582f3c1b1c6641a59a620224bc5772f7/gsnet/report.json
+- 感知：runs/restoration/20261105/perception/results.json
+- MoveIt：runs/restoration/20261105/moveit_plan.json
+- ROS：/home/wpy/armcode-runtime/ros_ws/logs/real/restore-20261105-final-status.txt
+- VLM：/home/wpy/qwen-vl-local/{preflight,verification}.json
+
+代码回归
+- 主感知环境：58 passed（环境选择、流水线、位姿选择和 FR3 集成）。
+- GSNet 环境：12 passed（离线预览几何与解释器选择）。
+- 预览几何直接在主感知 NumPy 1.26 环境运行时有 2 项 np.float 错误；
+  实际预览入口已改用 GSNet NumPy 1.23 环境，未篡改第三方库或全局 NumPy。
+- 机器可读总记录：runs/restoration/20261105/summary.json。
+
+首次实际运动更新（2026-11-05 12:58，覆盖上文“尚未运动/等待确认”状态）
+- 用户确认桌面已清空并开始真机测试。
+- 执行一次基座 Z 上移 20 mm、保持姿态，速度比例 5%；夹爪未动作，未自动返回。
+- 新规划时长 8.274 秒，检查 427 个碰撞样本。
+- 实际模型反馈 Z 上移 18.914 mm。
+- 端点位置误差 1.287 mm，姿态误差 0.131 度，均通过容差。
+- action status=4（成功），controller error code=0；机器人已静止。
+- 采样状态中 current_errors 和 last_motion_errors 均为空。
+- 清理及独立复查均确认 fr3_arm_controller inactive。
+- 当前 generic 内核已完成这一次低速运动；尚未验证长时间运行或带负载抓取。
+- 报告：runs/restoration/20261105/first_motion.json
+- 原始执行日志：/home/wpy/armcode-runtime/ros_ws/logs/real/first-motion-20261105/ptp-20261105-125845-107824.jsonl
+
+后续后端更新：用户要求切回原版 GraspNet-baseline，当前配置已改为 graspnet_baseline。
+详细配置、模型来源、测试及剩余抓取限制见 docs/graspnet_baseline_20261105.txt。

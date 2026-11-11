@@ -78,7 +78,7 @@ def extract_planar_hypotheses(packet, arrays, config=None):
     config = config or PlanarConfig()
     view = _prepare(packet, arrays, MultiViewConfig())
     fx, fy, cx, cy = view["intrinsic"]
-    edges, patches = [], []
+    edges, patches, collective = [], [], []
     for node_index, points in enumerate(view["evidence_points"]):
         for plane_index, (normal, offset, indices) in enumerate(_planes(points, config)):
             inliers = points[indices]
@@ -102,13 +102,20 @@ def extract_planar_hypotheses(packet, arrays, config=None):
                 "plane_normal_camera": normal.tolist(), "plane_offset_m": offset,
                 "median_residual_m": float(np.median(np.abs(inliers @ normal + offset))),
             })
-            for front_index in range(len(view["nodes"])):
-                if front_index == node_index:
-                    continue
+            counts = {i: int((hidden & (view['owner'][y, x] == i)).sum())
+                      for i in range(len(view['nodes'])) if i != node_index}
+            contributors = [i for i, count in counts.items() if count >= config.min_hidden_pixels]
+            joint_fraction = sum(counts[i] for i in contributors) / max(1, int(hull.sum()))
+            jointly_supported = len(contributors) >= 2 and joint_fraction >= config.min_hidden_fraction
+            if jointly_supported:
+                collective.append(dict(target=view['nodes'][node_index]['node_id'], plane_index=plane_index,
+                    sources=[view['nodes'][i]['node_id'] for i in contributors],
+                    joint_completion_fraction=joint_fraction, evidence='collective_planar_continuation', confirmed=False))
+            for front_index in contributors:
                 selected = hidden & (view["owner"][y, x] == front_index)
-                count = int(selected.sum())
+                count = counts[front_index]
                 fraction = count / max(1, int(hull.sum()))
-                if count < config.min_hidden_pixels or fraction < config.min_hidden_fraction:
+                if fraction < config.min_hidden_fraction and not jointly_supported:
                     continue
                 xy = np.column_stack((x[selected], y[selected]))
                 stride = max(1, int(np.ceil(len(xy) / 256)))
@@ -117,6 +124,7 @@ def extract_planar_hypotheses(packet, arrays, config=None):
                     "target": view["nodes"][node_index]["node_id"],
                     "relation": "possible_occludes",
                     "evidence": "visible_planar_patch_convex_continuation_prior",
+                    "collectively_supported": jointly_supported,
                     "view_id": view["frame"]["camera_id"],
                     "plane_index": plane_index, "unique_support_pixels": count,
                     "fraction_of_completed_patch": float(fraction),
@@ -126,4 +134,4 @@ def extract_planar_hypotheses(packet, arrays, config=None):
                     "scope": "hypothesized_surface_only_inside_visible_patch_convex_hull",
                 })
     return {"schema": "planar_continuation_v1", "config": asdict(config),
-            "patches": patches, "edges": edges}
+            "patches": patches, "edges": edges, "collective_occlusions": collective}

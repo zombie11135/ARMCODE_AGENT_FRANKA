@@ -1,0 +1,43 @@
+2026-11-05：目标身份未知时优先获取信息
+
+行为
+hybrid + enable_geometry_occlusion 默认启用单步 LLM 信息获取恢复，以及
+occlusion_allow_unlocalized_target。模板/CaP 对照模式不变。
+--disable_active_perception 可关闭这组默认设置，用于与原位重拍策略对照。
+参考身份识别仍会尝试，但失败不再阻止信息获取动作；最终目标抓取仍须确认身份。
+
+只规划（不加 --execute_robot）
+LLM 可以选择 plan_clear / plan_observe。根据可见几何的根节点及可揭示依赖数量
+提出一步探索，保存 information_plan.json；然后等待物理场景变化，不能假设清障已完成。
+未配置缓冲位时仍可输出探索意图，buffer_pose_mmrad=null，明确列出缺失条件。
+这是有根据的动作意图与后续观察分支，不是已通过 IK/碰撞检查的机器人轨迹。
+节点状态为 awaiting_information；任务 success 保持 false，不能把规划完成算抓放成功。
+保留原 failure_report.json 路径兼容日志读取，CLI 将其称为决策记录。
+
+实际清障
+仍需要 --execute_robot、--enable_occlusion_recovery、已确认空闲的缓冲位姿和清障预算。
+不会因为开启 hybrid 自动启用物理搬运，也不会替用户编造缓冲位或新的观察位姿。
+执行分支沿用原 clear_occlusion_to_buffer：搬一件、重拍重建关系、再选下一步。
+有配置恢复视角时可选择该视角；没有时不会凭空规划任意相机运动。
+没有可用关系根节点、身份关联歧义、预算耗尽或缺执行条件时保留等待状态。
+依赖分支数量只是揭示区域的排序依据，不是信息熵、目标位置概率或真实抓取可行性。
+
+主要文件
+runtime/config.py：hybrid 默认启用信息获取，可关闭作对照。
+agents/occlusion_recovery_planner.py：规划菜单、未知身份的探索候选及提示词。
+agents/information_plan.py：单步信息动作、缺失条件、重新建图与条件分支。
+skill_lib/actions/llm_occlusion_recovery.py：保存计划，规划分支不调用设备。
+runtime/task_state.py / agents/hybrid_execution.py：保留等待状态，不重复修复未执行的计划。
+agents/simple_execution_runtime.py / app/cli.py：等待新信息的用户输出。
+
+验证
+核心离线测试：707 passed, 2 skipped（新增 9 项）。
+当前真实场景两帧 + 本地 Qwen：均选择 plan_clear；首帧 N7，第二帧 N3。
+这些编号仅属于各自帧，不能作为跨帧身份。
+保存图重放脚本不构建硬件，运动、额外采集和清障调用均设为测试失败。
+结果：runs/experiments/information_seeking_20261105/frame_01、frame_02。
+真实清障后是否揭示西瓜霜尚未验证。本轮不执行任何机械臂或夹爪动作。
+
+完整 CLI 实时感知复测：约 23.638 秒，node=awaiting_information，revision=0；
+未执行动作，未消耗真实清障预算或缓冲位。日志和计划位于同目录 live/。
+最终提示修改后的关键回归：59 passed。

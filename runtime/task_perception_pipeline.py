@@ -6,11 +6,13 @@ reserve a buffer, or execute a grasp.
 """
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from contextvars import copy_context
 from pathlib import Path
 import time
 
 from core.context import RuntimeContext
 from services.object_reference_service import atomic_json
+from runtime.timing import timed_stage, timing_stage
 
 
 class TaskPerceptionPipeline:
@@ -29,9 +31,10 @@ class TaskPerceptionPipeline:
             source_capture=views[0]['color_path'], acquired_at=views[0]['timestamp'],
             provenance=deepcopy(views[0].get('observation_cache')), devices_used_by_worker=False)
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='task-perception')
-        self.future = self.pool.submit(self._work)
+        self.future = self.pool.submit(copy_context().run, self._work)
         self.consumed = False
 
+    @timed_stage('首帧后台感知总计')
     def _work(self):
         from skill_lib.actions.geometry_occlusion import analyze_geometry_views
         started = time.perf_counter()
@@ -46,9 +49,13 @@ class TaskPerceptionPipeline:
                 # normal planner will report any actual planning failure.
                 self.record['candidate_prefetch_error'] = type(error).__name__
             self.record['candidate_prefetch_s'] = time.perf_counter()-started
+        else:
+            self.record['candidate_prefetch'] = ('skipped_missing_transforms' if result.success
+                                                 else 'skipped_analysis_failed')
         self.record['background_total_s'] = time.perf_counter()-self.started
         return result
 
+    @timed_stage('后台抓取候选预计算')
     def _prefetch_candidates(self, data):
         from services.wrist_occlusion_service import choose_blocker
         from skill_lib.manipulation.clear_occlusion_to_buffer import _shrink_bbox
@@ -91,7 +98,8 @@ class TaskPerceptionPipeline:
         self.record['elapsed_before_join_s'] = time.perf_counter()-self.started
         waiting = time.perf_counter()
         try:
-            result = self.future.result()
+            with timing_stage('等待后台感知结果'):
+                result = self.future.result()
             self.record['join_wait_s'] = time.perf_counter()-waiting
             self.consumed = True
             for event in self.events:
@@ -131,11 +139,14 @@ class TaskPerceptionPipeline:
             atomic_json(self.trace_path, self.record)
 
     def close(self):
-        self.future.cancel()
-        self.pool.shutdown(wait=True, cancel_futures=True)
+        self.record['cancelled_on_close'] = self.future.cancel()
+        started = time.perf_counter()
+        with timing_stage('等待后台感知线程退出'):
+            self.pool.shutdown(wait=True, cancel_futures=True)
+        self.record['shutdown_wait_s'] = time.perf_counter()-started
         if not self.consumed:
             self.record['status'] = 'discarded_task_ended'
-            atomic_json(self.trace_path, self.record)
+        atomic_json(self.trace_path, self.record)
 
 
 def start_task_perception_pipeline(robot, actions, captures, config):

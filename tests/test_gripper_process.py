@@ -1,3 +1,4 @@
+from hardware.config import ArmConfig
 """Spawned gripper sessions over an in-memory Modbus transport; no USB/robot."""
 import ctypes
 from dataclasses import asdict, dataclass, replace
@@ -261,7 +262,7 @@ def test_original_agent_callbacks_and_lift_use_the_process_contact_driver(config
     from runtime.config import SimpleAgentSystemConfig
     config = contact_config(config, tmp_path)
     driver = ProcessGripper(config, execution_enabled=True, serial_factory=SerialFactory(str(tmp_path), contact=True))
-    arm = Mock()
+    arm = Mock(config=ArmConfig())
     arm.motion_guard = None
     arm.get_pose.return_value = Pose6D(.3,0,.35,3.14,0,-1.57)
     def move(pose):

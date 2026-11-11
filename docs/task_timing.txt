@@ -1,0 +1,102 @@
+任务速度与阶段计时
+================
+
+机械臂速度
+
+原启动命令中增加 --arm-speed 0.20，即为本次运行选择 0.20 的运动速度比例。
+当前接口接受 (0, 1]，不传时读取硬件 YAML 中的 arm.speed_scaling。
+可以从 0.10 调到 0.15、0.20，再根据实际运动表现选择 0.30。
+它是 MoveIt 轨迹速度比例，不是米/秒；模型计算、相机拍摄和进程通信不会因此变快，
+任务总耗时也不会随比例严格成反比。启动时打印实际 arm.speed_scaling。
+
+腕部主视角、未知目标探索性清障、本地模型的完整交互启动示例：
+
+  bash run_fr3_agent.sh \
+    --local_vlm qwen3vl-8b-awq \
+    --arm-speed 0.20 \
+    --use_llm_planner \
+    --use-sam-for-grasp \
+    --enable_geometry_occlusion \
+    --disable_geometry_occlusion_auxiliary \
+    --enable_occlusion_recovery \
+    --enable_llm_occlusion_recovery \
+    --occlusion_allow_unlocalized_target \
+    --geometry_occlusion_buffer_xyz_mm 450 -420 300 \
+    --execute_robot
+
+这里的缓冲位沿用最近实验的基座系法兰 XYZ（毫米），朝向沿用启动时实际法兰朝向。
+根据实际布置选择缓冲位。进入 armcode> 后输入任务才开始执行。
+--occlusion_allow_unlocalized_target 允许目标身份未知时，利用已有潜在遮挡关系做有界清障；
+这不证明未知节点一定是指定药品，搬运后仍需重新观察并识别目标。
+
+默认阶段计时
+
+无需增加计时参数，重启 Agent 后自动生效。每次任务会打印 [timing] 日志：
+  任务规划、动作代码生成、执行服务加载、相机启动与预热、硬件会话初始化；
+  任务首帧拍摄、目标身份识别、SAM3 分割与遮挡关系构建；
+  容器检测与坐标计算、单个容器定位、容器预观测总计、返回 home；
+  后台抓取候选预计算、首帧后台感知总计、等待后台感知结果；
+  执行前 Gate、LLM 清障恢复决策、清障流程、抓取流程；
+  抓取候选服务、抓取规划与位姿筛选、抓取位姿预览窗口等待；
+  机械臂调用、夹爪张开/闭合、放置与验证流程、LLM/VLM 请求。
+只有实际经过的路径会产生相应记录。没有任务计时上下文的独立技能调用不额外输出。
+
+每条显示秒数和 ok/failed/error，后台线程附加 [后台]，抓取候选缓存命中附加 [缓存命中]。
+JSON 中还记录 GPU/OCR 资源锁等待，它不单独刷终端日志。
+异常与返回失败都会保留计时记录；原返回值与异常继续按原执行逻辑处理。
+
+报告位置
+
+默认最新一轮：runs/current_plan/task_timing.json
+每轮历史：    runs/current_plan/timing/<时间-唯一编号>.json
+--plan_json 指向其他目录时，计时报告随该目录保存。
+
+duration_s 是任务从进入规划/执行入口到结束的实际经过时间，用单调时钟测量。
+不包含交互界面输入任务前的等待，也不包含进入交互界面前本地 VLM 服务的启动。
+spans 包含每次调用的 id、parent_id、name、detail、相对开始时间 start_s、
+duration_s、status、background、线程名及缓存命中等属性。
+summary 按阶段、detail 和是否后台汇总调用次数、累计耗时、失败次数。
+报告包含执行/试运行模式、请求速度比例；硬件初始化 span 记录实际采用的速度比例。
+后续任务覆盖最新报告，同时保留每轮独立历史文件。报告留在 runs/，不随源码上传。
+
+如何判断慢在哪里
+
+这些时间是主机端实际经过时间，包含嵌套和并行阶段，不能把所有行简单相加。
+例如后台分析在机械臂观测容器期间完成，会同时出现在两个阶段的时间区间中；
+返回时的“等待后台感知结果”才是此时感知造成的直接等待，不能重复加上后台完整耗时。
+stage 的 parent_id、start_s 和 duration_s 可用于重建并行时间线。
+
+机械臂调用的 detail 区分 pose、plan、move、plan_grasps。
+move 包含 Docker/ROS 通信、轨迹规划和运动执行，不代表纯机械运动时长；
+pose 是只读位姿查询，同样可能存在通信/会话开销。
+模型服务计时包含 CPU 准备与结果处理；GPU 锁等待另有子记录。
+抓取候选预计算失败时仍允许原前台规划继续，失败记录可用于发现预计算未起效。
+
+抓取位姿预览是阻塞窗口，其时间包含加载预览进程和等待关闭窗口。
+若不需要每轮人工查看，在原命令中加 --no-visualize-selected-grasp 可取消该预览。
+失败后的夹爪保持通信交互另记为“故障后人工夹爪会话等待”，也计入入口到结束的总耗时。
+使用 dry-run 得到的是感知/规划计时，不能拿来估计真实运动耗时。
+
+核心代码：runtime/timing.py；任务入口在 agents/simple_agent_system.py，
+阶段接入在 agents/simple_execution_runtime.py、runtime/task_perception_pipeline.py，
+以及对应技能、服务和 hardware/fr3.py 的 timed_stage。
+tests/test_task_timing.py 和测试用的假设备流水线覆盖嵌套、并行、失败、历史与上下文隔离。
+
+2026-11-09 流水线计时补充
+
+感知内部 ordered_bounded_map 为每个 worker 复制计时上下文，内部阶段和 GPU/OCR 锁等待
+现在可以归入同一任务、保留父 span。“子任务代码生成”记录 node/revision/speculative，
+“等待后台代码线程退出”和“等待后台感知线程退出”区分任务收尾等待。
+hybrid_trace.json 的 session_finished.prefetch_jobs 包含预生成排队、生成、join、失效、
+取消结果、浪费和失效后仍在运行的时间；这些 job 工作时间不可直接加到任务墙钟。
+perception_pipeline.json 明确记录缺少 transforms 或分析失败时跳过候选预计算的原因。
+固定输入的四组模拟对照与真实代码模型可选入口见 docs/pipeline_optimization_20261109.txt。
+模拟对照、真实代码模型调用、真实感知和真机运动必须分别解释，不能从模拟延时推算实机收益。
+
+2026-11-11 真机基线补充
+
+现有机械臂调用的总时间仍保留；新增 worker 内 MOTION_PLAN 和 MOVE 分开测量，
+不再需要从 move RPC 总耗时猜测运动时间。HANDOFF 使用控制器执行接口边界。
+新增 phases/recovery_events、每轮 CSV 和分组 mean/P50/P90 导出。
+完整计时口径、试验命令和未验证边界见 docs/fr3_timing_baseline_20261111.txt。
+当前用户选择先准备、稍后摆放，允许用 GraspNet-baseline；尚未执行本轮真机任务。

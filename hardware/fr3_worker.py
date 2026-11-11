@@ -12,6 +12,62 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
+from contextlib import contextmanager
+
+
+
+def install_timing(session, result):
+    """Observe existing Session calls; no new ROS requests or motion commands."""
+    result['timing'] = []
+    try:
+        result['timing_clock'] = Path('/proc/sys/kernel/random/boot_id').read_text().strip() + ':' + os.readlink('/proc/self/ns/time')
+    except OSError:
+        result['timing_clock'] = None
+
+    @contextmanager
+    def span(name, phase=None):
+        row = dict(name=name, phase=phase, start_monotonic_s=time.monotonic(), status='ok', attributes={})
+        try:
+            yield row['attributes']
+        except BaseException:
+            row['status'] = 'error'
+            raise
+        finally:
+            row['duration_s'] = time.monotonic()-row['start_monotonic_s']
+            if row['attributes'].get('success') is False:
+                row['status'] = 'failed'
+            result['timing'].append(row)
+
+    original_call, original_wait = session.call, session.wait
+    original_prepare = session.prepare
+
+    def call(srv, name, request, timeout=15):
+        if name != '/plan_kinematic_path':
+            return original_call(srv, name, request, timeout)
+        with span('MoveIt轨迹规划服务', 'MOTION_PLAN') as attrs:
+            response = original_call(srv, name, request, timeout)
+            plan = response.motion_plan_response
+            attrs.update(boundary='service_roundtrip_including_availability_wait',
+                         server_planning_s=float(plan.planning_time),
+                         planner_error_code=plan.error_code.val, success=plan.error_code.val == 1)
+            return response
+
+    def wait(future, timeout=15, monitor=False):
+        if not monitor:
+            return original_wait(future, timeout, monitor)
+        with span('FR3控制器执行', 'MOVE') as attrs:
+            attrs['boundary'] = 'accepted_goal_result_wait; excludes_activation_and_endpoint_check'
+            outcome = original_wait(future, timeout, monitor)
+            attrs.update(action_status=outcome.status, controller_error_code=outcome.result.error_code,
+                         success=outcome.status == 4 and outcome.result.error_code == 0)
+            return outcome
+
+    def prepare():
+        with span('FR3规划准备总计'):
+            return original_prepare()
+
+    session.call, session.wait, session.prepare = call, wait, prepare
 
 
 def main():
@@ -76,6 +132,7 @@ def main():
         initialized = True
         with log_path.open("x") as log:
             session = ptp.Session(args, log)
+            install_timing(session, result)
             original_emit = session.emit
 
             def emit(event, **data):

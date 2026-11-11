@@ -60,7 +60,7 @@ def run(request):
     mask = (np.load(request['target_mask_path'], allow_pickle=False)
             if request.get('target_mask_path') else None)
     sys.path.insert(0, str(sdk))
-    from gsnet import AnyGrasp
+    from .anygrasp_sdk import AnyGrasp
     import torch
     from services.anygrasp_service import pushd
     np.random.seed(0)
@@ -86,7 +86,9 @@ def run(request):
     np.save(output / 'sdk_candidates.npy', raw)
     np.save(output / 'target_candidates.npy', target_rows)
     np.save(output / 'filtered_candidates.npy', rows)
-    report = dict(backend='anygrasp', counts=counts, input_points=len(points),
+    report = dict(backend='anygrasp', sdk_api=net.sdk_api, counts=counts, input_points=len(points),
+                  max_gripper_width_m=request['max_gripper_width'],
+                  image_size=[meta['color_intrinsics']['width'], meta['color_intrinsics']['height']],
                   table_clearance_check_enabled=request.get('grasp_table_clearance_check', True),
                   inference_cloud='full scene; bbox/SAM filters output grasp centers',
                   sdk_collision_detection=request['collision_detection'],

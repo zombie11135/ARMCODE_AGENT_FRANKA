@@ -18,6 +18,7 @@ class ArmConfig:
     workspace: str = "/home/seur/data/wpy/armcode_agent"
     stack: str = "real"
     speed_scaling: float = 0.10
+    grasp_contact_speed_scaling: float = 0.20
     position_tolerance_m: float = 0.003
     orientation_tolerance_rad: float = math.pi / 180
     request_timeout_s: float = 180
@@ -25,6 +26,18 @@ class ArmConfig:
     home_pose: Optional[list] = None
     # Absolute flange Z in fr3_link0 for releasing an object; None uses vision-relative height.
     place_flange_z_m: Optional[float] = None
+    gentle_place_enabled: bool = False
+    place_final_descent_m: float = 0.025
+    place_descent_speed_scaling: float = 0.03
+    place_retreat_speed_scaling: float = 0.05
+    place_settle_s: float = 0.4
+    # Measured at release orientation; BOTH must be supplied to lower release.
+    place_support_z_m: Optional[float] = None
+    place_object_bottom_offset_m: Optional[float] = None
+    place_release_gap_m: float = 0.01
+    place_height_mode: str = 'fixed'
+    place_support_footprint_m: float = 0.08
+    place_support_max_relief_m: float = 0.008
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,10 @@ class PerceptionSettings:
     parallel_candidate_workers: int = 2
     grasp_backend: str = "gsnet"
     gsnet_root: str = "/home/seur/data/wpy/conda_envs/env_armcode_agent/src/gsnet"
+    graspnet_root: Optional[str] = None
+    graspnet_ckpt: Optional[str] = None
+    graspnet_python: Optional[str] = None
+    graspnet_max_gripper_width_m: float = .085
     sam3_model_dir: str = "/home/seur/data/wpy/models/sam3"
     # Model loading is deferred until the corresponding perception skill runs.
     grounding_dino_model: Optional[str] = None
@@ -142,8 +159,11 @@ def load_config(path=None) -> HardwareConfig:
             reference = path.parent / reference
         cfg = replace(cfg, perception=replace(cfg.perception, reference_config=str(reference.resolve())))
     validate_gripper_feedback(cfg.gripper)
-    if cfg.perception.grasp_backend not in ("gsnet", "anygrasp"):
-        raise ValueError("perception.grasp_backend must be gsnet or anygrasp")
+    if cfg.perception.grasp_backend not in ("gsnet", "graspnet_baseline", "anygrasp"):
+        raise ValueError("perception.grasp_backend must be gsnet, graspnet_baseline or anygrasp")
+    _positive('perception.graspnet_max_gripper_width_m', cfg.perception.graspnet_max_gripper_width_m)
+    if cfg.perception.graspnet_max_gripper_width_m > .085:
+        raise ValueError('perception.graspnet_max_gripper_width_m exceeds Robotiq 2F-85 opening (0.085 m)')
     if type(cfg.perception.parallel_candidate_workers) is not int or not 1 <= cfg.perception.parallel_candidate_workers <= 4:
         raise ValueError('perception.parallel_candidate_workers must be an integer in [1, 4]')
     if cfg.schema_version != 1 or cfg.arm.stack not in ("real", "fake"):
@@ -152,14 +172,44 @@ def load_config(path=None) -> HardwareConfig:
         raise ValueError('arm.singularity_screening must be endpoint or advisory')
     if not Path(cfg.arm.workspace).is_absolute():
         raise ValueError("arm.workspace must be an absolute path")
-    for name in ("speed_scaling", "position_tolerance_m", "orientation_tolerance_rad", "request_timeout_s"):
+    for name in ("speed_scaling", "grasp_contact_speed_scaling", "position_tolerance_m", "orientation_tolerance_rad", "request_timeout_s"):
         _positive(f"arm.{name}", getattr(cfg.arm, name))
-    if cfg.arm.speed_scaling > 1 or cfg.arm.orientation_tolerance_rad > math.pi:
-        raise ValueError("speed_scaling must be <= 1; orientation tolerance must be <= pi")
+    if max(cfg.arm.speed_scaling, cfg.arm.grasp_contact_speed_scaling) > 1 or cfg.arm.orientation_tolerance_rad > math.pi:
+        raise ValueError("speed_scaling and grasp_contact_speed_scaling must be <= 1; orientation tolerance must be <= pi")
     if cfg.arm.home_pose is not None:
         Pose6D(*cfg.arm.home_pose)
     if cfg.arm.place_flange_z_m is not None:
         _positive('arm.place_flange_z_m', cfg.arm.place_flange_z_m)
+    if type(cfg.arm.gentle_place_enabled) is not bool:
+        raise ValueError('arm.gentle_place_enabled must be boolean')
+    for name in ('place_final_descent_m', 'place_descent_speed_scaling',
+                 'place_retreat_speed_scaling', 'place_settle_s', 'place_release_gap_m'):
+        _positive('arm.' + name, getattr(cfg.arm, name))
+    if not (cfg.arm.place_descent_speed_scaling <= 1 and cfg.arm.place_retreat_speed_scaling <= 1):
+        raise ValueError('Placement speed scaling must be <= 1')
+    if cfg.arm.place_final_descent_m > .10 or cfg.arm.place_settle_s > 5:
+        raise ValueError('Placement final descent must be <= .10 m and settle time <= 5 s')
+    support, offset = cfg.arm.place_support_z_m, cfg.arm.place_object_bottom_offset_m
+    if cfg.arm.place_height_mode not in ('fixed', 'stack_rgbd'):
+        raise ValueError('place_height_mode must be fixed or stack_rgbd')
+    for name in ('place_support_footprint_m', 'place_support_max_relief_m'):
+        _positive('arm.' + name, getattr(cfg.arm, name))
+    if cfg.arm.place_height_mode == 'stack_rgbd':
+        if not cfg.arm.gentle_place_enabled or offset is None or support is not None:
+            raise ValueError('stack_rgbd requires gentle placement, measured object bottom offset, and no fixed support Z')
+        _positive('arm.place_object_bottom_offset_m', offset)
+        if cfg.arm.place_release_gap_m <= cfg.arm.position_tolerance_m:
+            raise ValueError('Release gap must exceed endpoint position tolerance')
+    if cfg.arm.place_height_mode == 'fixed' and (support is None) != (offset is None):
+        raise ValueError('Specify BOTH place_support_z_m and place_object_bottom_offset_m')
+    if support is not None:
+        if isinstance(support, bool) or not isinstance(support, (int, float)) or not math.isfinite(support):
+            raise ValueError('arm.place_support_z_m must be finite')
+        _positive('arm.place_object_bottom_offset_m', offset)
+        if not cfg.arm.gentle_place_enabled:
+            raise ValueError('Measured placement geometry requires gentle_place_enabled')
+        if cfg.arm.place_release_gap_m <= cfg.arm.position_tolerance_m:
+            raise ValueError('Release gap must exceed endpoint position tolerance')
     for name in ("io_timeout_s", "motion_timeout_s", "poll_interval_s", "keepalive_interval_s",
                  "startup_timeout_s", "state_timeout_s"):
         _positive(f"gripper.{name}", getattr(cfg.gripper, name))
